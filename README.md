@@ -69,7 +69,7 @@ IDOR, SSRF, XSS, SQLi, Auth Bypass, SSTI, Open Redirect, LFI, Command Injection,
 ```bash
 # Clone
 git clone <repo>
-cd ai-pentest-daemon
+cd pentdem
 
 # Install dependencies
 pip install -r requirements.txt
