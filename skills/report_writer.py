@@ -89,7 +89,9 @@ class ReportWriter:
 
         from urllib.parse import urlsplit
         url = finding.get("endpoint", finding.get("url", ""))
-        url = self._redact_url(url)
+        # Prefer tested_url which has the actual payload injected
+        tested_url = finding.get("tested_url", url)
+        url = self._redact_url(tested_url or url)
         method = str(finding.get("method", "GET")).upper()
         headers = finding.get("headers", {}) or finding.get("request_headers", {}) or {}
         body = finding.get("body", finding.get("request_body", "")) or ""
@@ -104,13 +106,6 @@ class ReportWriter:
             host = target
             path = url or "/"
 
-        # Include payload in URL if SSTI or similar
-        param = finding.get("parameter", finding.get("param", ""))
-        payload = finding.get("payload", "")
-        if payload and "?" not in path and param:
-            # Build URL with injected payload for evidence
-            path = f"{path}?{param}={payload[:100]}"
-
         lines = [f"{method} {path} HTTP/1.1", f"Host: {host}"]
         if headers:
             for k, v in headers.items():
@@ -121,7 +116,7 @@ class ReportWriter:
             lines.extend(["", str(body)[:4000]])
         return "\n".join(lines)
 
-def _build_http_response(self, finding: dict) -> str:
+    def _build_http_response(self, finding: dict) -> str:
         """Return a report-safe raw HTTP response for a finding."""
         explicit = finding.get("http_response") or finding.get("response")
         if explicit:
@@ -136,11 +131,12 @@ def _build_http_response(self, finding: dict) -> str:
             # For SSTI, show context around evaluation proof
             response_context = finding.get("response_context", "")
             if response_context:
-                return f"HTTP/1.1 {status}\nContent-Type: text/html\n\nContext around evaluation proof '{evaluation_proof}': {response_context[:1000]}"
+                # Show the actual context where the proof was found
+                return f"HTTP/1.1 {status}\nContent-Type: text/html\n\n{response_context[:1000]}"
             return f"HTTP/1.1 {status}\nEvaluation confirmed: {evaluation_proof}\n{str(evidence)[:4000]}"
 
         if status and evidence:
-            return f"HTTP status: {status}\n{str(evidence)[:4000]}"
+            return f"HTTP/1.1 {status}\n{str(evidence)[:4000]}"
 
         return str(evidence)[:4000] if evidence else "No response captured"
 

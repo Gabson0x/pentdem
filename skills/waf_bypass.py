@@ -42,6 +42,7 @@ class BypassResult:
     body: str
     success: bool
     evaluation_proof: Optional[str] = None  # The evaluated result (e.g., "49")
+    test_url: Optional[str] = None  # The URL that was tested
 
 
 @dataclass
@@ -404,6 +405,7 @@ class WAFBypassEngine:
                         body=body[:500],
                         success=True,
                         evaluation_proof=evaluation_proof,
+                        test_url=test_url,
                     ))
                     return SSTIVerdict(
                         verdict=BypassVerdict.CONFIRMED,
@@ -425,6 +427,7 @@ class WAFBypassEngine:
                         status=status,
                         body=body[:500],
                         success=False,
+                        test_url=test_url,
                     ))
                 else:
                     all_attempts.append(BypassResult(
@@ -433,6 +436,7 @@ class WAFBypassEngine:
                         status=status,
                         body=body[:500],
                         success=False,
+                        test_url=test_url,
                     ))
 
             except Exception as e:
@@ -442,6 +446,7 @@ class WAFBypassEngine:
                     status=0,
                     body=f"Error: {str(e)}",
                     success=False,
+                    test_url=test_url,
                 ))
 
         # All bypasses failed
@@ -706,6 +711,7 @@ Return ONLY the JSON array, no other text."""
                             status=status,
                             body=body[:500],
                             success=False,
+                            test_url=test_url,
                         ))
                         continue
 
@@ -720,6 +726,7 @@ Return ONLY the JSON array, no other text."""
                             body=body[:500],
                             success=True,
                             evaluation_proof=evaluation_proof,
+                            test_url=test_url,
                         ))
                         return SSTIVerdict(
                             verdict=BypassVerdict.CONFIRMED,
@@ -739,6 +746,7 @@ Return ONLY the JSON array, no other text."""
                         status=status,
                         body=body[:500],
                         success=False,
+                        test_url=test_url,
                     ))
 
                 except Exception as e:
@@ -748,6 +756,7 @@ Return ONLY the JSON array, no other text."""
                         status=0,
                         body=f"Error: {str(e)}",
                         success=False,
+                        test_url=test_url,
                     ))
 
         # Final verdict based on all attempts (standard + LLM)

@@ -491,7 +491,9 @@ class HuntSkill(BaseSkill):
                                 findings.append({
                                     "type": "SSTI (Bypass)",
                                     "url": test_url,
+                                    "endpoint": test_url,
                                     "param": param_name,
+                                    "parameter": param_name,
                                     "payload": payload,
                                     "severity": "critical",
                                     "evidence": f"Bypass SSTI evaluation confirmed: {context.replace(chr(10), ' ').replace(chr(13), '')[:300]}",
@@ -503,6 +505,9 @@ class HuntSkill(BaseSkill):
                                     "status_code": pr["status"],
                                     "evaluation_proof": expected,
                                     "response_context": context,
+                                    "tested_url": test_url,
+                                    "http_request": f"GET {test_url} HTTP/1.1\nHost: {parsed.netloc}\nUser-Agent: Mozilla/5.0\nAccept: */*",
+                                    "http_response": f"HTTP/1.1 {pr['status']}\nContent-Type: text/html\n\n{context.replace(chr(10), ' ').replace(chr(13), '')[:500]}",
                                 })
                                 break
 
@@ -1387,13 +1392,15 @@ class HuntSkill(BaseSkill):
                         start = max(0, idx - 50)
                         end = min(len(pr["body"]), idx + len(expected) + 50)
                         context = pr["body"][start:end]
-                        # Reject if the raw payload template is echoed (reflection ≠ evaluation)
+# Reject if the raw payload template is echoed (reflection ≠ evaluation)
                         if "{{7*7}}" in context or "${7*7}" in context or "<%= 7*7 %>" in context:
                             continue
                         findings.append({
                             "type": "SSTI",
                             "url": test_url,
+                            "endpoint": test_url,
                             "param": param_name,
+                            "parameter": param_name,
                             "payload": payload,
                             "severity": "critical",
                             "evidence": f"SSTI evaluation confirmed: {context.replace(chr(10), ' ').replace(chr(13), '')[:300]}",
@@ -1404,6 +1411,9 @@ class HuntSkill(BaseSkill):
                             "status_code": pr["status"],
                             "evaluation_proof": expected,
                             "response_context": context,
+                            "tested_url": test_url,
+                            "http_request": f"GET {test_url} HTTP/1.1\nHost: {parsed.netloc}\nUser-Agent: Mozilla/5.0\nAccept: */*",
+                            "http_response": f"HTTP/1.1 {pr['status']}\nContent-Type: text/html\n\n{context.replace(chr(10), ' ').replace(chr(13), '')[:500]}",
                         })
                         break
 
