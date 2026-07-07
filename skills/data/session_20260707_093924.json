@@ -1,0 +1,49 @@
+{
+  "target": "example.com",
+  "mode": "full",
+  "platform": "hackerone",
+  "stages": {
+    "recon": {
+      "subdomains": [
+        "api.example.com",
+        "dev.example.com",
+        "staging.example.com"
+      ],
+      "live_hosts": [
+        {
+          "host": "api.example.com",
+          "status": "alive",
+          "ports": [
+            80,
+            443
+          ]
+        }
+      ],
+      "urls": [
+        {
+          "host": "api.example.com",
+          "status": "alive",
+          "ports": [
+            80,
+            443
+          ]
+        }
+      ]
+    },
+    "hunt": {
+      "tests_run": [
+        "idor",
+        "ssrf",
+        "xss",
+        "sqli"
+      ],
+      "tests_passed": []
+    },
+    "validate": {
+      "triaged": [],
+      "deduplicated": []
+    }
+  },
+  "findings": [],
+  "report": null
+}

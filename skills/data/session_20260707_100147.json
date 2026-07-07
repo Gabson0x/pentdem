@@ -1,0 +1,33 @@
+{
+  "target": "httpbin.org",
+  "mode": "quick",
+  "platform": "hackerone",
+  "stages": {
+    "recon": {
+      "subdomains": [
+        "httpbin.org"
+      ],
+      "live_hosts": [
+        {
+          "host": "httpbin.org",
+          "status": "unknown"
+        }
+      ]
+    },
+    "hunt": {
+      "tests_run": [
+        "idor",
+        "ssrf",
+        "xss",
+        "sqli"
+      ],
+      "tests_passed": []
+    },
+    "validate": {
+      "triaged": [],
+      "deduplicated": []
+    }
+  },
+  "findings": [],
+  "report": null
+}

@@ -1,0 +1,34 @@
+{
+  "target": "www.coinhako.com",
+  "mode": "full",
+  "platform": "hackerone",
+  "stages": {
+    "recon": {
+      "subdomains": [
+        "www.coinhako.com"
+      ],
+      "live_hosts": [
+        {
+          "host": "www.coinhako.com",
+          "status": "unknown"
+        }
+      ],
+      "urls": []
+    },
+    "hunt": {
+      "tests_run": [
+        "idor",
+        "ssrf",
+        "xss",
+        "sqli"
+      ],
+      "tests_passed": []
+    },
+    "validate": {
+      "triaged": [],
+      "deduplicated": []
+    }
+  },
+  "findings": [],
+  "report": null
+}

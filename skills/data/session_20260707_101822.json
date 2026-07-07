@@ -1,0 +1,49 @@
+{
+  "target": "httpbin.org",
+  "mode": "quick",
+  "platform": "hackerone",
+  "stages": {
+    "recon": {
+      "subdomains_raw": [
+        "eu.httpbin.org",
+        "www.httpbin.org"
+      ],
+      "live_hosts": [],
+      "urls": [],
+      "attack_surface": {
+        "total_urls": 0,
+        "unique_paths": [],
+        "unique_params": [],
+        "api_endpoints": [],
+        "admin_panels": [],
+        "js_files": [],
+        "endpoints": []
+      },
+      "analysis": {
+        "raw": "Given the provided recon data, which indicates that no live hosts, API endpoints, parameters, admin panels, or paths have been discovered, the analysis for security testing prioritization would be quite limited. However, we can still attempt to provide a strategic analysis based on common security testing practices and the assumption that the target is a web application running on httpbin.org, which is a service that provides a simple, stateless, HTTP request and response service for testing.\n\nHere is the JSON object with the analysis:\n\n```json\n{\n  \"tech_stack\": [\"HTTP\", \"Python\", \"Flask\"],\n  \"highest_risk_endpoints\": [\"none discovered\"],\n  \"recommended_tests\": [\n    \"HTTP Method Testing (GET, POST, etc.)\",\n    \"Input Validation Testing\",\n    \"Error Handling Testing\",\n    \"CORS Testing\",\n    \"Rate Limiting Testing\",\n    \"API Key Security Testing\"\n  ],\n  \"attack_vectors\": [\n    \"HTTP Method Injection\",\n    \"Cross-Site Scripting (XSS)\",\n    \"Cross-Site Request Forgery (CSRF)\",\n    \"SQL Injection\",\n    \"Command Injection\",\n    \"Directory Traversal\",\n    \"File Inclusion\",\n    \"Insecure Direct Object References (IDOR)\",\n    \"Server-Side Request Forgery (SSRF)\",\n    \"Insecure Deserialization\"\n  ],\n  \"notes\": \"Given the lack of discovered information, the following strategic approach is recommended:\\n\" +\n           \"- Perform a thorough HTTP method testing to identify any potential for HTTP method injection.\\n\" +\n           \"- Test for input validation issues across all endpoints, as these are common vectors for attacks.\\n\" +\n           \"- Check for proper error handling to ensure that no sensitive information is leaked.\\n\" +\n           \"- Verify Cross-Origin Resource Sharing (CORS) settings to prevent unauthorized cross-domain access.\\n\" +\n           \"- Test for rate limiting to assess the application's resilience against brute force attacks.\\n\" +\n           \"- If API keys are used, ensure they are properly secured and not exposed.\\n\" +\n           \"Since no specific endpoints or parameters have been identified, a broad approach to testing is necessary. It is also important to note that httpbin.org is a testing service and may not represent the same security concerns as a production web application.\"\n}\n```\n\nThis analysis assumes that httpbin.org is a web application that could potentially have similar security concerns to other web applications. The \"notes\" section provides strategic guidance on where to focus the testing efforts, given the limited information available."
+      }
+    },
+    "hunt": {
+      "tests_run": [
+        "idor",
+        "ssrf",
+        "xss",
+        "sqli",
+        "auth_bypass",
+        "ssti",
+        "open_redirect",
+        "lfi",
+        "command_injection",
+        "nosqli",
+        "graphql"
+      ],
+      "tests_passed": []
+    },
+    "validate": {
+      "triaged": [],
+      "deduplicated": []
+    }
+  },
+  "findings": [],
+  "report": null
+}

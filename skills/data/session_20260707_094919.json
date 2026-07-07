@@ -1,0 +1,144 @@
+{
+  "target": "example.com",
+  "mode": "full",
+  "platform": "hackerone",
+  "stages": {
+    "recon": {
+      "subdomains": [
+        "api.example.com",
+        "dev.example.com",
+        "staging.example.com"
+      ],
+      "live_hosts": [
+        {
+          "host": "api.example.com",
+          "status": "alive",
+          "ports": [
+            80,
+            443
+          ]
+        }
+      ],
+      "urls": [
+        "{'host': 'api.example.com', 'status': 'alive', 'ports': [80, 443]}"
+      ]
+    },
+    "hunt": {
+      "tests_run": [
+        "idor",
+        "ssrf",
+        "xss",
+        "sqli"
+      ],
+      "tests_passed": [
+        "idor",
+        "ssrf",
+        "xss",
+        "sqli"
+      ]
+    },
+    "validate": {
+      "triaged": [
+        "IDOR",
+        "SSRF",
+        "XSS",
+        "SQLi"
+      ],
+      "deduplicated": [
+        "IDOR",
+        "SSRF",
+        "XSS",
+        "SQLi"
+      ]
+    },
+    "report": {
+      "report": "# Security Vulnerability Report\n\n## Summary\nFound multiple security vulnerabilities in the target application.\n\n## Vulnerabilities\n1. IDOR - User ID enumeration via predictable IDs\n2. SSRF - Internal server-side request forgery\n3. XSS - Reflected cross-site scripting\n4. SQLi - SQL injection in user ID parameter\n\n## Impact\nAttackers can access unauthorized data, internal services, and execute malicious scripts.\n\n## Remediation\n- Implement proper authorization checks\n- Validate and sanitize all user inputs\n- Use parameterized queries",
+      "platform": "hackerone",
+      "target": "example.com",
+      "finding_count": 4
+    }
+  },
+  "findings": [
+    {
+      "type": "IDOR",
+      "url": "https://api.example.com/v1/users/123",
+      "param": "user_id",
+      "severity": "high",
+      "description": "User IDOR via predictable IDs",
+      "triage": {
+        "pass": true,
+        "answers": {
+          "q1": "yes",
+          "q2": "yes",
+          "q3": "yes",
+          "q4": "yes",
+          "q5": "yes",
+          "q6": "yes",
+          "q7": "yes"
+        },
+        "reason": "All checks passed"
+      }
+    },
+    {
+      "type": "SSRF",
+      "url": "https://api.example.com/fetch?url=",
+      "param": "url",
+      "severity": "high",
+      "description": "Internal SSRF via URL parameter",
+      "triage": {
+        "pass": true,
+        "answers": {
+          "q1": "yes",
+          "q2": "yes",
+          "q3": "yes",
+          "q4": "yes",
+          "q5": "yes",
+          "q6": "yes",
+          "q7": "yes"
+        },
+        "reason": "All checks passed"
+      }
+    },
+    {
+      "type": "XSS",
+      "url": "https://example.com/search?q=",
+      "param": "q",
+      "severity": "high",
+      "description": "Reflected XSS in search parameter",
+      "triage": {
+        "pass": true,
+        "answers": {
+          "q1": "yes",
+          "q2": "yes",
+          "q3": "yes",
+          "q4": "yes",
+          "q5": "yes",
+          "q6": "yes",
+          "q7": "yes"
+        },
+        "reason": "All checks passed"
+      }
+    },
+    {
+      "type": "SQLi",
+      "url": "https://api.example.com/users?id=",
+      "param": "id",
+      "severity": "high",
+      "description": "SQL injection in user ID parameter",
+      "triage": {
+        "pass": true,
+        "answers": {
+          "q1": "yes",
+          "q2": "yes",
+          "q3": "yes",
+          "q4": "yes",
+          "q5": "yes",
+          "q6": "yes",
+          "q7": "yes"
+        },
+        "reason": "All checks passed"
+      }
+    }
+  ],
+  "report": "# Security Vulnerability Report\n\n## Summary\nFound multiple security vulnerabilities in the target application.\n\n## Vulnerabilities\n1. IDOR - User ID enumeration via predictable IDs\n2. SSRF - Internal server-side request forgery\n3. XSS - Reflected cross-site scripting\n4. SQLi - SQL injection in user ID parameter\n\n## Impact\nAttackers can access unauthorized data, internal services, and execute malicious scripts.\n\n## Remediation\n- Implement proper authorization checks\n- Validate and sanitize all user inputs\n- Use parameterized queries"
+}
