@@ -620,7 +620,7 @@ class PentestPipeline:
                     cvss_score=f.get("cvss_score", 0),
                     evidence=f.get("evidence", ""),
                     description=f.get("description", ""),
-                    source_tool=f.get("source_tool", "autonomous-agent"),
+                    source=f.get("source_tool", "autonomous-agent"),
                 )
                 results["findings"].append(finding)
 
