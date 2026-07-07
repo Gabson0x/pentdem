@@ -170,6 +170,7 @@ async def main():
         sys.exit(1)
 
     findings = results.get("findings", [])
+    candidate_findings = results.get("candidate_findings", findings)
     chains = results.get("chains", [])
     report_text = results.get("report")
     metrics = results.get("metrics", {})
@@ -192,7 +193,11 @@ async def main():
     print(f"  {color('Recon:', 'yellow')}  {subdomains} subdomains, {live_hosts} live hosts, {urls} URLs")
 
     individual_findings = [f for f in findings if f.get("type") != "Attack Chain"]
-    print(f"  {color('Findings:', 'yellow')} {len(individual_findings)} {'vulnerability' if len(individual_findings) == 1 else 'vulnerabilities'}")
+    individual_candidates = [f for f in candidate_findings if isinstance(f, dict) and f.get("type") != "Attack Chain"]
+    rejected_count = max(0, len(individual_candidates) - len(individual_findings))
+    print(f"  {color('Findings:', 'yellow')} {len(individual_findings)} reportable {'vulnerability' if len(individual_findings) == 1 else 'vulnerabilities'}")
+    if rejected_count:
+        print(f"  {color('Filtered:', 'yellow')} {rejected_count} non-reportable candidate(s)")
     print(f"  {color('Chains:', 'yellow')}  {len(chains)} {'attack chain' if len(chains) == 1 else 'attack chains'}")
     print()
 
@@ -260,7 +265,7 @@ async def main():
             print(f"  {color('... (report truncated, total ' + str(len(lines)) + ' lines)', 'cyan')}")
         print()
 
-    print(f"  {color('DONE', 'green')} — {len(findings)} findings, {len(chains)} chains in {duration:.1f}s")
+    print(f"  {color('DONE', 'green')} — {len(individual_findings)} reportable findings, {rejected_count} filtered candidates, {len(chains)} chains in {duration:.1f}s")
 
 
 async def _handle_knowledge_command(args: list, mock_mode: bool = False):

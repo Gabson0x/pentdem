@@ -14,12 +14,32 @@ CVSS_31_METRICS = {
     "availability": {"high": 0.56, "low": 0.22, "none": 0.0},
 }
 
+VULN_ALIASES = {
+    "sqli": "SQLi",
+    "sql_injection": "SQLi",
+    "ssrf": "SSRF",
+    "xss": "XSS",
+    "idor": "IDOR",
+    "bola": "IDOR",
+    "auth_bypass": "Auth Bypass",
+    "authentication_bypass": "Auth Bypass",
+    "ssti": "SSTI",
+    "server_side_template_injection": "SSTI",
+    "open_redirect": "Open Redirect",
+    "lfi": "LFI",
+    "local_file_inclusion": "LFI",
+    "command_injection": "Command Injection",
+    "rce": "Command Injection",
+    "nosqli": "NoSQLi",
+    "graphql": "GraphQL Introspection",
+}
+
 VULN_TO_CVSS = {
     "SQLi": {"av": "network", "ac": "low", "pr": "none", "ui": "none", "s": "unchanged", "c": "high", "i": "high", "a": "high"},
     "SSRF": {"av": "network", "ac": "low", "pr": "none", "ui": "none", "s": "changed", "c": "low", "i": "low", "a": "none"},
     "XSS": {"av": "network", "ac": "low", "pr": "none", "ui": "required", "s": "changed", "c": "low", "i": "low", "a": "none"},
     "IDOR": {"av": "network", "ac": "low", "pr": "low", "ui": "none", "s": "unchanged", "c": "high", "i": "none", "a": "none"},
-    "Auth Bypass": {"av": "network", "ac": "low", "pr": "none", "ui": "none", "s": "unchanged", "c": "high", "i": "high", "a": "all"},
+    "Auth Bypass": {"av": "network", "ac": "low", "pr": "none", "ui": "none", "s": "unchanged", "c": "high", "i": "high", "a": "high"},
     "SSTI": {"av": "network", "ac": "low", "pr": "none", "ui": "none", "s": "changed", "c": "high", "i": "high", "a": "high"},
     "Open Redirect": {"av": "network", "ac": "low", "pr": "none", "ui": "required", "s": "changed", "c": "none", "i": "low", "a": "none"},
     "LFI": {"av": "network", "ac": "low", "pr": "none", "ui": "none", "s": "unchanged", "c": "high", "i": "none", "a": "none"},
@@ -103,7 +123,9 @@ class ValidateSkill(BaseSkill):
         return score, severity
 
     def _score_cvss(self, finding: dict) -> dict:
-        vuln_type = finding.get("type", finding.get("vuln_class", ""))
+        raw_vuln_type = finding.get("type", finding.get("vuln_class", ""))
+        vuln_key = str(raw_vuln_type).strip()
+        vuln_type = VULN_ALIASES.get(vuln_key.lower(), vuln_key)
         base_metrics = VULN_TO_CVSS.get(vuln_type)
 
         if not base_metrics:

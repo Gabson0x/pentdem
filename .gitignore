@@ -15,9 +15,12 @@ data/sessions/
 data/patterns.json
 
 # Reports
-reports/*.md
-reports/*.json
-reports/*.pdf
+reports/
+!reports/.gitkeep
+
+# Evidence
+evidence/
+!evidence/.gitkeep
 
 # IDE
 .vscode/

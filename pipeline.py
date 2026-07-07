@@ -94,7 +94,11 @@ class PentestPipeline:
 
         # Autonomous agent (primary engine)
         try:
-            self.model_client = ModelClient()
+            if mock:
+                from mock_models import MockModelClient
+                self.model_client = MockModelClient()
+            else:
+                self.model_client = ModelClient()
         except Exception:
             self.model_client = None
         self.agent = AutonomousAgent(mock=mock, model_client=self.model_client)
@@ -153,7 +157,7 @@ class PentestPipeline:
         Looks for Nuclei, Nmap, Nikto, ffuf output files and parses them.
         """
         import glob
-        evidence_dir = Path(f"evidence/{target.replace('/', '_')}")
+        evidence_dir = Path(f"reports/{target.replace('/', '_')}/evidence")
         if not evidence_dir.exists():
             return []
 
@@ -327,8 +331,14 @@ class PentestPipeline:
             f["noise_level"] = "active"
 
         # ── Step 5: Verify findings with confirmation loops ──
-        verifier = Verifier(tools=tools)
-        verified_findings = await verifier.verify_batch(all_findings)
+        if self.config.get("mock_mode", False):
+            # In mock mode, skip verification and mark all as verified
+            for f in all_findings:
+                f["verification"] = {"status": "verified", "confidence": f.get("confidence", 0.5)}
+            verified_findings = all_findings
+        else:
+            verifier = Verifier(tools=tools)
+            verified_findings = await verifier.verify_batch(all_findings)
 
         # Filter to verified/likely_verified only
         confirmed_findings = [
@@ -402,8 +412,20 @@ class PentestPipeline:
             "message": f"Running 7-Question Gate on {len(findings)} findings..."
         })
 
+        # Convert Finding objects to dicts for validate skill
+        def to_dict(f):
+            if isinstance(f, dict):
+                return f
+            if hasattr(f, 'to_dict'):
+                return f.to_dict()
+            if hasattr(f, '__dict__'):
+                return f.__dict__
+            return f
+
+        all_items = [to_dict(f) for f in findings] + [to_dict(c) for c in chains]
+
         validate_result = await self.skills["validate"].execute({
-            "findings": findings + chains,
+            "findings": all_items,
         })
 
         validated = validate_result.findings
@@ -415,11 +437,6 @@ class PentestPipeline:
         await self._emit_progress("screenshot", "running", 0.87, {
             "message": f"Capturing evidence cards for {len(findings)} findings..."
         })
-
-        # Skip screenshots in mock mode (Playwright not needed)
-        if self.state.mock:
-            await self._emit_progress("screenshot", "completed", 0.89, {"screenshots": 0})
-            return findings
 
         # Capture screenshots for critical/high findings
         screenshot_findings = [
@@ -484,12 +501,19 @@ class PentestPipeline:
             await self._emit_progress("report", "completed", 0.95)
             return {"report": None, "report_dir": None}
 
+        candidate_findings = [f if isinstance(f, dict) else (f.to_dict() if hasattr(f, 'to_dict') else f) for f in findings]
+        reportable_findings = self.report_writer.filter_reportable(candidate_findings)
+
         # Write standalone MD report in per-target folder
         report_path = self.report_writer.write_main_report(
             target=target,
-            findings=[f if isinstance(f, dict) else (f.to_dict() if hasattr(f, 'to_dict') else f) for f in findings],
+            findings=reportable_findings,
             chains=[c if isinstance(c, dict) else (c.to_dict() if hasattr(c, 'to_dict') else c) for c in chains],
             tool_outputs=tool_outputs,
+            metadata={
+                "candidate_findings": len(candidate_findings),
+                "rejected_findings": len(candidate_findings) - len(reportable_findings),
+            },
         )
 
         # Also keep legacy report text for display
@@ -565,9 +589,9 @@ class PentestPipeline:
             "metrics": {"started_at": time.time(), "completed_at": None, "duration": 0},
         }
 
-        # Initialize evidence handler
+        # Initialize evidence handler - save in reports folder alongside findings
         self.evidence = EvidenceHandler(
-            base_dir=f"evidence/{target.replace('/', '_')}",
+            base_dir=f"reports/{target.replace('/', '_')}",
             engagement_id=f"{target}_{int(time.time())}",
         )
 
@@ -609,20 +633,31 @@ class PentestPipeline:
             results["stages"]["agent_fuzz"] = agent_results.get("phases", {}).get("fuzz", {})
             results["stages"]["agent_exploit"] = agent_results.get("phases", {}).get("exploit", {})
 
-            # Convert agent findings to pipeline format
+            # Convert agent findings to pipeline format while preserving raw fields
+            # needed by validation/reportability gates (verdict, payload, url, etc.).
             for f in agent_results.get("findings", []):
                 finding = Finding(
-                    vuln_class=f.get("type", "unknown"),
-                    endpoint=f.get("url", ""),
-                    parameter=f.get("param", ""),
+                    title=f.get("title", f.get("type", "unknown")),
+                    vuln_class=f.get("type", f.get("vuln_class", "unknown")),
+                    endpoint=f.get("url", f.get("endpoint", "")),
+                    parameter=f.get("param", f.get("parameter", "")),
                     severity=f.get("severity", "info"),
                     confidence=f.get("confidence", 0.5),
                     cvss_score=f.get("cvss_score", 0),
                     evidence=f.get("evidence", ""),
                     description=f.get("description", ""),
-                    source=f.get("source_tool", "autonomous-agent"),
+                    impact=f.get("impact", ""),
+                    remediation=f.get("remediation", ""),
+                    poc=f.get("poc", f.get("poc_script", "")),
+                    source=f.get("source_tool", f.get("source", "autonomous-agent")),
+                    raw_data=f,
                 )
-                results["findings"].append(finding)
+                item = finding.to_dict() if hasattr(finding, 'to_dict') else finding.__dict__
+                item.update({k: v for k, v in f.items() if k not in item})
+                item.setdefault("type", item.get("vuln_class", "unknown"))
+                item.setdefault("url", item.get("endpoint", ""))
+                item.setdefault("param", item.get("parameter", ""))
+                results["findings"].append(item)
 
             # Convert agent chains
             for c in agent_results.get("chains", []):
@@ -692,8 +727,13 @@ class PentestPipeline:
         results["report_path"] = report_data.get("report_path")
         results["report_dir"] = report_data.get("report_dir")
 
+        # Keep candidate findings for diagnostics, but only persist/report memory-safe findings.
+        candidate_findings = [f if isinstance(f, dict) else (f.to_dict() if hasattr(f, 'to_dict') else f) for f in validated]
+        reportable_findings = self.report_writer.filter_reportable(candidate_findings)
+
         # Phase 6: Memory
-        results["findings"] = [f if isinstance(f, dict) else (f.to_dict() if hasattr(f, 'to_dict') else f) for f in validated]
+        results["candidate_findings"] = candidate_findings
+        results["findings"] = reportable_findings
         results["chains"] = [c if isinstance(c, dict) else (c.to_dict() if hasattr(c, 'to_dict') else c) for c in results["chains"]]
         await self._phase_memory(results, results["findings"], target)
 

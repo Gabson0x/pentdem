@@ -47,11 +47,11 @@ class EvidenceHandler:
         safe_target = self._sanitize(target)
         filename = f"{vuln_type}_{safe_target}_{ts}.{extension}"
 
-        # Create target subdirectory
-        target_dir = self.base_dir / safe_target
-        target_dir.mkdir(parents=True, exist_ok=True)
+        # Create evidence subdirectory
+        evidence_dir = self.base_dir / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
 
-        filepath = target_dir / filename
+        filepath = evidence_dir / filename
 
         filepath.write_text(content, encoding="utf-8")
 

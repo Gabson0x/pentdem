@@ -53,6 +53,128 @@ class ReportWriter:
         (target_dir / "evidence").mkdir(exist_ok=True)
         return target_dir
 
+    _SENSITIVE_KEYS = {
+        "authorization", "cookie", "set-cookie", "x-api-key", "api_key",
+        "token", "access_token", "refresh_token", "password", "passwd",
+        "secret", "session", "sessionid", "jwt", "key",
+    }
+
+    def _redact_value(self, key: str, value) -> str:
+        """Redact secrets before writing reports or summary JSON."""
+        key_l = str(key or "").lower()
+        value_s = str(value or "")
+        if any(s in key_l for s in self._SENSITIVE_KEYS):
+            return "[REDACTED]"
+        return value_s
+
+    def _redact_url(self, url: str) -> str:
+        """Redact sensitive query parameter values while preserving exploit evidence."""
+        from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+        if not url:
+            return ""
+        try:
+            parts = urlsplit(url)
+            pairs = []
+            for k, v in parse_qsl(parts.query, keep_blank_values=True):
+                pairs.append((k, self._redact_value(k, v)))
+            return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(pairs, doseq=True), parts.fragment))
+        except Exception:
+            return url
+
+    def _build_http_request(self, target: str, finding: dict) -> str:
+        """Return a report-safe raw HTTP request for a finding."""
+        explicit = finding.get("http_request") or finding.get("request")
+        if explicit:
+            return str(explicit)
+
+        from urllib.parse import urlsplit
+        url = finding.get("endpoint", finding.get("url", ""))
+        url = self._redact_url(url)
+        method = str(finding.get("method", "GET")).upper()
+        headers = finding.get("headers", {}) or finding.get("request_headers", {}) or {}
+        body = finding.get("body", finding.get("request_body", "")) or ""
+
+        try:
+            parts = urlsplit(url)
+            host = parts.netloc or target
+            path = parts.path or "/"
+            if parts.query:
+                path = f"{path}?{parts.query}"
+        except Exception:
+            host = target
+            path = url or "/"
+
+        lines = [f"{method} {path} HTTP/1.1", f"Host: {host}"]
+        if headers:
+            for k, v in headers.items():
+                lines.append(f"{k}: {self._redact_value(k, v)}")
+        else:
+            lines.extend(["User-Agent: Mozilla/5.0", "Accept: */*"])
+        if body:
+            lines.extend(["", str(body)[:4000]])
+        return "\n".join(lines)
+
+    def _build_http_response(self, finding: dict) -> str:
+        explicit = finding.get("http_response") or finding.get("response")
+        if explicit:
+            return str(explicit)[:8000]
+        evidence = finding.get("evidence", "")
+        status = finding.get("status_code")
+        if status and evidence:
+            return f"HTTP status: {status}\n{str(evidence)[:4000]}"
+        return str(evidence)[:4000] if evidence else ""
+
+    def _screenshot_summary(self, finding: dict) -> list[dict]:
+        out = []
+        for ss in finding.get("screenshots", []) or []:
+            if isinstance(ss, dict):
+                item = {
+                    "filename": os.path.basename(ss.get("filename", ss.get("file", ""))),
+                    "file": ss.get("file", ss.get("filename", "")),
+                    "description": ss.get("description", ss.get("finding_type", "evidence")),
+                }
+            else:
+                item = {"filename": os.path.basename(str(ss)), "file": str(ss), "description": "evidence"}
+            out.append(item)
+        return out
+
+    def _finding_summary(self, target: str, finding: dict, index: int, file_path: str = "") -> dict:
+        """Small but useful summary for summary.json."""
+        return {
+            "index": index,
+            "title": finding.get("title", finding.get("type", finding.get("vuln_class", "Unknown"))),
+            "type": finding.get("type", finding.get("vuln_class", "unknown")),
+            "severity": str(finding.get("severity", "info")).upper(),
+            "cvss_score": finding.get("cvss_score", 0),
+            "confidence": finding.get("confidence", 0),
+            "url": self._redact_url(finding.get("endpoint", finding.get("url", ""))),
+            "param": finding.get("parameter", finding.get("param", "")),
+            "payload": finding.get("payload", ""),
+            "status_code": finding.get("status_code"),
+            "evidence": str(finding.get("evidence", ""))[:1000],
+            "http_request": self._build_http_request(target, finding),
+            "http_response": self._build_http_response(finding),
+            "screenshots": self._screenshot_summary(finding),
+            "finding_file": file_path,
+        }
+
+    def _target_screenshots(self, target: str) -> list[dict]:
+        target_dir = self._get_target_dir(target)
+        screenshots_dir = target_dir / "screenshots"
+        if not screenshots_dir.exists():
+            return []
+        screenshots = []
+        for f in sorted(screenshots_dir.glob("*.png")):
+            item = {"filename": f.name, "file": str(f), "size": f.stat().st_size}
+            meta_file = f.with_suffix(".json")
+            if meta_file.exists():
+                try:
+                    item.update(json.loads(meta_file.read_text(encoding="utf-8")))
+                except Exception:
+                    pass
+            screenshots.append(item)
+        return screenshots
+
     def write_finding(self, target: str, finding: dict, index: int) -> str:
         """Write a single finding as a standalone MD file."""
         target_dir = self._get_target_dir(target)
@@ -132,6 +254,26 @@ class ReportWriter:
 ```
 
 """
+        http_request = self._build_http_request(target, finding)
+        if http_request:
+            content += f"""## HTTP Request
+
+```http
+{http_request}
+```
+
+"""
+
+        http_response = self._build_http_response(finding)
+        if http_response:
+            content += f"""## HTTP Response / Evidence
+
+```http
+{http_response}
+```
+
+"""
+
         if poc:
             content += f"""## Proof of Concept
 
@@ -199,7 +341,11 @@ class ReportWriter:
         safe = self._sanitize_target(target)
         date_str = datetime.now().strftime("%Y-%m-%d")
 
-        # Filter to only CONFIRMED findings (is_reportable gate)
+        metadata = metadata or {}
+        candidate_count = metadata.get("candidate_findings", len(findings))
+        rejected_count = metadata.get("rejected_findings", 0)
+
+        # Filter to only reportable findings (confirmed / validated and non-zero CVSS).
         findings = self.filter_reportable(findings)
 
         filename = f"{safe.title()}_Security_Report_{date_str}.md"
@@ -242,7 +388,9 @@ This report presents the findings of an automated security assessment of **{targ
 |--------|-------|
 | Overall Risk | **{overall_severity}** |
 | Max CVSS Score | {max_cvss} |
-| Total Findings | {len(individual)} |
+| Reportable Findings | {len(individual)} |
+| Candidate Findings Reviewed | {candidate_count} |
+| Rejected / Non-reportable Findings | {rejected_count} |
 | Attack Chains | {len(all_chains)} |
 | Critical | {sev_counts.get("CRITICAL", 0)} |
 | High | {sev_counts.get("HIGH", 0)} |
@@ -378,8 +526,15 @@ This report presents the findings of an automated security assessment of **{targ
                 if tool.get("findings_count"):
                     content += f"**Findings:** {tool['findings_count']}\n\n"
 
+        if rejected_count > 0:
+            content += f"""## Non-reportable Candidates
+
+{rejected_count} candidate finding(s) were excluded from the final findings because they did not meet the reportability gate, for example unconfirmed verdict, CVSS 0, or insufficient confidence/evidence.
+
+"""
+
         # Methodology
-        content += """## Methodology
+        content += f"""## Methodology
 
 This assessment was conducted using the following methodology:
 
@@ -407,15 +562,24 @@ This assessment was conducted using the following methodology:
 
         # Also save a JSON summary
         summary_path = target_dir / "summary.json"
+        finding_files = [self.write_finding(target, f, i + 1) for i, f in enumerate(individual)]
+        finding_summaries = [
+            self._finding_summary(target, f, i + 1, finding_files[i])
+            for i, f in enumerate(individual)
+        ]
         summary = {
             "target": target,
             "date": date_str,
             "overall_severity": overall_severity,
             "max_cvss": max_cvss,
             "total_findings": len(individual),
+            "candidate_findings": candidate_count,
+            "rejected_findings": rejected_count,
             "total_chains": len(all_chains),
             "severity_counts": sev_counts,
-            "finding_files": [self.write_finding(target, f, i+1) for i, f in enumerate(individual)],
+            "finding_files": finding_files,
+            "findings": finding_summaries,
+            "screenshots": self._target_screenshots(target),
         }
         summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
