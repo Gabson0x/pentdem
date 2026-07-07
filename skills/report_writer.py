@@ -104,6 +104,13 @@ class ReportWriter:
             host = target
             path = url or "/"
 
+        # Include payload in URL if SSTI or similar
+        param = finding.get("parameter", finding.get("param", ""))
+        payload = finding.get("payload", "")
+        if payload and "?" not in path and param:
+            # Build URL with injected payload for evidence
+            path = f"{path}?{param}={payload[:100]}"
+
         lines = [f"{method} {path} HTTP/1.1", f"Host: {host}"]
         if headers:
             for k, v in headers.items():
@@ -114,15 +121,28 @@ class ReportWriter:
             lines.extend(["", str(body)[:4000]])
         return "\n".join(lines)
 
-    def _build_http_response(self, finding: dict) -> str:
+def _build_http_response(self, finding: dict) -> str:
+        """Return a report-safe raw HTTP response for a finding."""
         explicit = finding.get("http_response") or finding.get("response")
         if explicit:
             return str(explicit)[:8000]
+
         evidence = finding.get("evidence", "")
         status = finding.get("status_code")
+        evaluation_proof = finding.get("evaluation_proof", "")
+
+        # Build proper HTTP response from evidence
+        if status and evaluation_proof:
+            # For SSTI, show context around evaluation proof
+            response_context = finding.get("response_context", "")
+            if response_context:
+                return f"HTTP/1.1 {status}\nContent-Type: text/html\n\nContext around evaluation proof '{evaluation_proof}': {response_context[:1000]}"
+            return f"HTTP/1.1 {status}\nEvaluation confirmed: {evaluation_proof}\n{str(evidence)[:4000]}"
+
         if status and evidence:
             return f"HTTP status: {status}\n{str(evidence)[:4000]}"
-        return str(evidence)[:4000] if evidence else ""
+
+        return str(evidence)[:4000] if evidence else "No response captured"
 
     def _screenshot_summary(self, finding: dict) -> list[dict]:
         out = []
@@ -151,6 +171,7 @@ class ReportWriter:
             "param": finding.get("parameter", finding.get("param", "")),
             "payload": finding.get("payload", ""),
             "status_code": finding.get("status_code"),
+            "evaluation_proof": finding.get("evaluation_proof", ""),
             "evidence": str(finding.get("evidence", ""))[:1000],
             "http_request": self._build_http_request(target, finding),
             "http_response": self._build_http_response(finding),

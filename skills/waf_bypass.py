@@ -531,7 +531,7 @@ class WAFBypassEngine:
         """
         Check if the expected evaluation result appears in the body.
 
-        Returns the proof string if found, None otherwise.
+        Returns the proof string with context if found, None otherwise.
         """
         if not body or not expected:
             return None

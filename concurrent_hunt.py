@@ -17,7 +17,7 @@ from urllib.parse import urlparse, parse_qs
 
 from rate_limiter import RateLimiter
 from tools import ToolExecutor
-from skills.bypass import BypassEngine
+from skills.bypass import BypassEngine, BypassResult
 
 
 # ─── URL Scorer (Deterministic, No LLM) ──────────────────────────
@@ -376,9 +376,18 @@ class ConcurrentHuntRunner:
                             confirmed=True,
                             technique_used="direct",
                             payload=payload,
+                            mutated_payload=payload,
                             evaluation_proof=proof,
                             status_code=pr.get("status", 0),
                             evidence=f"Direct evaluation confirmed: {proof}",
+                            all_attempts=[BypassResult(
+                                technique="direct",
+                                payload_mutated=payload,
+                                status=pr.get("status", 0),
+                                body=pr.get("body", "")[:500],
+                                success=True,
+                                evaluation_proof=proof,
+                            )],
                         )
                     else:
                         return SSTIVerdict(
@@ -406,9 +415,17 @@ class ConcurrentHuntRunner:
 
     def _build_finding_from_verdict(self, verdict: "SSTIVerdict", target: str) -> dict:
         """Build a finding dict from an SSTI verdict."""
+        # Get the tested URL from the verdict's attempts
+        tested_url = ""
+        if hasattr(verdict, 'all_attempts') and verdict.all_attempts:
+            for attempt in verdict.all_attempts:
+                if attempt.success:
+                    tested_url = attempt.payload_mutated
+                    break
+        
         return {
             "type": "ssti",
-            "url": verdict.payload if verdict.payload.startswith("http") else f"https://{target}",
+            "url": tested_url if tested_url and "http" in str(tested_url) else f"https://{target}",
             "param": "test",
             "payload": verdict.payload,
             "mutated_payload": verdict.mutated_payload,
@@ -422,6 +439,10 @@ class ConcurrentHuntRunner:
             "status_code": verdict.status_code,
             "verdict": verdict.verdict.value,
             "bypass_attempts": len(verdict.all_attempts),
+            "evaluation_proof": verdict.evaluation_proof,
+            "tested_url": tested_url,
+            "http_request": f"GET {tested_url.split('://')[-1] if tested_url else '/'} HTTP/1.1" if tested_url else "",
+            "http_response": f"Status: {verdict.status_code}\nEvaluation proof: {verdict.evaluation_proof}" if verdict.evaluation_proof else "",
         }
 
     # ─── Payloads per Class ──────────────────────────────────────
@@ -670,6 +691,7 @@ class ConcurrentHuntRunner:
         status = response.get("status", 0)
         body = response.get("body", "")
         headers = response.get("headers", {})
+        parsed = urlparse(url)
 
         # Compute confidence based on response analysis
         confidence = self._compute_confidence(vuln_class, payload, status, body, headers)
@@ -677,19 +699,41 @@ class ConcurrentHuntRunner:
         # Compute dynamic CVSS based on context
         cvss = self._compute_cvss(vuln_class, status, body, headers)
 
+        # Build proper HTTP request string
+        param_name = list(parse_qs(parsed.query).keys())[0] if parse_qs(parsed.query) else "test"
+        http_request = f"GET {url.split('://')[-1] if '://' in url else url} HTTP/1.1\\nHost: {parsed.netloc}\\nUser-Agent: Mozilla/5.0\\nAccept: */*"
+
+        # Build HTTP response from actual response
+        header_strs = [f"{k}: {v}" for k, v in headers.items()]
+        http_response = f"HTTP/1.1 {status}\\n" + "\\n".join(header_strs[:10]) + f"\\n\\n{body[:2000]}"
+
+        # Extract evaluation proof for SSTI
+        evaluation_proof = ""
+        if vuln_class == "ssti":
+            expected = self.SSTI_EXPECTED.get(payload)
+            if expected and expected in body:
+                idx = body.find(expected)
+                start = max(0, idx - 50)
+                end = min(len(body), idx + len(expected) + 50)
+                evaluation_proof = expected
+
         return {
             "type": vuln_class,
             "url": url,
-            "param": self._extract_param(url),
+            "param": param_name,
             "payload": payload,
             "severity": self._severity_for_class(vuln_class),
             "confidence": confidence,
             "cvss_score": cvss,
-            "evidence": f"Status: {status}, Body: {body[:300]}",
+            "evidence": f"Status: {status}, Body: {body[:500]}",
             "description": self._gen_description(vuln_class, status, body),
             "source_tool": "concurrent-hunt",
             "response_size": len(body),
             "status_code": status,
+            "http_request": http_request,
+            "http_response": http_response[:4000],
+            "evaluation_proof": evaluation_proof,
+            "response_context": body[max(0, body.find(evaluation_proof)-100):body.find(evaluation_proof)+len(evaluation_proof)+100] if evaluation_proof else "",
         }
 
     def _extract_param(self, url: str) -> str:

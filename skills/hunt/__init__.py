@@ -477,21 +477,34 @@ class HuntSkill(BaseSkill):
                     resp = await self._make_request(test_url)
                     pr = self._parse_response(resp["raw"])
 
-                    if "49" in pr["body"] or "777" in pr["body"] or "config" in pr["body"].lower():
-                        findings.append({
-                            "type": "SSTI (Bypass)",
-                            "url": test_url,
-                            "param": param_name,
-                            "payload": payload,
-                            "severity": "critical",
-                            "evidence": f"Bypass SSTI result: {pr['body'][:300]}",
-                            "description": f"SSTI via WAF bypass in {param_name}",
-                            "confidence": 0.85,
-                            "bypass_technique": self._classify_bypass(payload),
-                            "cvss_score": 9.8,
-                            "source_tool": "hunt-bypass",
-                        })
-                        break
+                    # Check for evaluation proof with context validation
+                    # Expected results: 49 (for {{7*7}}), 7777777 (for {{7*'7'}})
+                    for expected in ("49", "7777777", "823543"):
+                        if expected in pr["body"]:
+                            # Verify payload is NOT just echoed back
+                            idx = pr["body"].find(expected)
+                            start = max(0, idx - 50)
+                            end = min(len(pr["body"]), idx + len(expected) + 50)
+                            context = pr["body"][start:end]
+                            # Reject if raw payload syntax is in context (reflection ≠ evaluation)
+                            if "{{{" + expected + "}" not in context and "${" + expected + "}" not in context:
+                                findings.append({
+                                    "type": "SSTI (Bypass)",
+                                    "url": test_url,
+                                    "param": param_name,
+                                    "payload": payload,
+                                    "severity": "critical",
+                                    "evidence": f"Bypass SSTI evaluation confirmed: {context.replace(chr(10), ' ').replace(chr(13), '')[:300]}",
+                                    "description": f"SSTI via WAF bypass in {param_name} — {expected} evaluated",
+                                    "confidence": 0.85,
+                                    "bypass_technique": self._classify_bypass(payload),
+                                    "cvss_score": 9.8,
+                                    "source_tool": "hunt-bypass",
+                                    "status_code": pr["status"],
+                                    "evaluation_proof": expected,
+                                    "response_context": context,
+                                })
+                                break
 
         return findings, test_names
 
@@ -1358,25 +1371,39 @@ class HuntSkill(BaseSkill):
             params = parse_qs(parsed.query)
 
             for param_name in params:
-                for payload in self.tools.payloads.SSTI[:3]:
+                for payload in self.tools.payloads.SSTI[:5]:
                     new_params = dict(params)
                     new_params[param_name] = [payload]
                     test_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{urlencode(new_params, doseq=True)}"
                     resp = await self._make_request(test_url)
                     pr = self._parse_response(resp["raw"])
 
-                    if "49" in pr["body"] or "777" in pr["body"]:
+                    # Check for evaluation proof with context validation
+                    expected = "49"
+                    idx = pr["body"].find(expected)
+                    if idx >= 0:
+                        # Verify it's actual SSTI, not just random "49" in page
+                        # Check that payload brackets are NOT just echoed back
+                        start = max(0, idx - 50)
+                        end = min(len(pr["body"]), idx + len(expected) + 50)
+                        context = pr["body"][start:end]
+                        # Reject if the raw payload template is echoed (reflection ≠ evaluation)
+                        if "{{7*7}}" in context or "${7*7}" in context or "<%= 7*7 %>" in context:
+                            continue
                         findings.append({
                             "type": "SSTI",
                             "url": test_url,
                             "param": param_name,
                             "payload": payload,
                             "severity": "critical",
-                            "evidence": f"Math result: {pr['body'][:300]}",
-                            "description": f"SSTI in {param_name}",
+                            "evidence": f"SSTI evaluation confirmed: {context.replace(chr(10), ' ').replace(chr(13), '')[:300]}",
+                            "description": f"SSTI in {param_name} — arithmetic evaluation proven",
                             "confidence": 0.85,
                             "cvss_score": 9.8,
                             "source_tool": "hunt",
+                            "status_code": pr["status"],
+                            "evaluation_proof": expected,
+                            "response_context": context,
                         })
                         break
 

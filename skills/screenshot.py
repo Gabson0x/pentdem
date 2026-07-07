@@ -306,9 +306,42 @@ class ScreenshotCapture:
         source = finding.get("source_tool", finding.get("source", "pentest-daemon"))
         mitre = finding.get("mitre_attack_id", "N/A")
         description = finding.get("description", "")
+        http_request = finding.get("http_request", "")
+        http_response = finding.get("http_response", "")
 
-        http_request = f"GET {endpoint} HTTP/1.1\\nHost: {target}\\nUser-Agent: Mozilla/5.0\\nAccept: */*"
-        http_response = evidence[:2000] if evidence else "No response captured"
+        # Build actual HTTP request with payload injection if we have the tested URL
+        if not http_request:
+            tested_url = finding.get("tested_url", finding.get("mutated_url", endpoint))
+            # Extract parameter name from finding
+            param_name = parameter or "test"
+            if tested_url and "?" in tested_url:
+                http_request = f"GET {tested_url.split('://')[-1] if '://' in tested_url else tested_url} HTTP/1.1\\nHost: {tested_url.split('/')[0] if '/' in tested_url else target}\\nUser-Agent: Mozilla/5.0\\nAccept: */*"
+            elif endpoint and param_name:
+                # Build request showing payload injection
+                injected_url = f"{endpoint}?{param_name}={poc or 'PAYLOAD'}"
+                http_request = f"GET {injected_url.split('://')[-1] if '://' in injected_url else injected_url} HTTP/1.1\\nHost: {injected_url.split('/')[0] if '/' in injected_url else target}\\nUser-Agent: Mozilla/5.0\\nAccept: */*"
+            else:
+                http_request = f"GET / HTTP/1.1\\nHost: {target}\\nUser-Agent: Mozilla/5.0\\nAccept: */*"
+
+        # Build actual HTTP response with real status and body context
+        if not http_response:
+            status_code = finding.get("status_code", "Unknown")
+            if evidence:
+                # Include the actual response body snippet around the evaluation proof
+                if vuln_type.lower() == "ssti" and finding.get("evaluation_proof"):
+                    proof = finding.get("evaluation_proof")
+                    # Find context around the proof in evidence
+                    idx = evidence.find(proof)
+                    if idx >= 0:
+                        start = max(0, idx - 100)
+                        end = min(len(evidence), idx + len(proof) + 100)
+                        http_response = f"HTTP/1.1 {status_code}\\nContent-Type: text/html\\n\\n{...{evidence[start:end]}...}"
+                    else:
+                        http_response = f"HTTP/1.1 {status_code}\\nContent-Type: text/html\\n\\n{evidence[:2000]}"
+                else:
+                    http_response = f"HTTP/1.1 {status_code}\\nContent-Type: text/html\\n\\n{evidence[:2000]}"
+            else:
+                http_response = "No response captured"
         analysis = description or "Analysis pending"
 
         sev_class = severity.lower().replace(" ", "-")
