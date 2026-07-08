@@ -359,7 +359,12 @@ class PentestPipeline:
 
         # ── Step 3: Run all classes concurrently ──
         tools = self.skills["hunt"].tools
-        runner = ConcurrentHuntRunner(tools=tools, mock=self.config.get("mock_mode", False))
+        # Use scope-declared rate limit if available
+        rate_limiter = None
+        if self.scope_guard and self.scope_guard.rate_limit_rps:
+            from rate_limiter import RateLimiter
+            rate_limiter = RateLimiter(max_per_sec=self.scope_guard.rate_limit_rps, burst=self.scope_guard.rate_limit_rps)
+        runner = ConcurrentHuntRunner(tools=tools, rate_limiter=rate_limiter, mock=self.config.get("mock_mode", False))
 
         all_findings = await runner.run_all_classes(
             urls=all_urls,
@@ -480,10 +485,13 @@ class PentestPipeline:
             ("oauth", {**ctx, "urls": [u for u in all_urls if "auth" in u.lower() or "login" in u.lower() or "oauth" in u.lower()][:5]}),
             ("mass_assignment", {**ctx, "urls": [u for u in all_urls if any(p in u.lower() for p in ["api", "user", "account", "profile", "settings"])]}),
             ("jwt", {**ctx, "urls": [u for u in all_urls if any(p in u.lower() for p in ["api", "auth", "token", "jwt"])]}),
-            ("cloud_metadata", {**ctx, "urls": all_urls[:5]}),
             ("subdomain_takeover", {**ctx, "subdomains": subdomains}),
             ("api_discovery", {**ctx, "urls": all_urls[:10]}),
         ]
+
+        # Cloud metadata only if scope allows it
+        if self.scope_guard and self.scope_guard.allow_cloud_metadata:
+            advanced_skills.append(("cloud_metadata", {**ctx, "urls": all_urls[:5]}))
 
         tasks = []
         for skill_name, skill_ctx in advanced_skills:
@@ -919,8 +927,19 @@ class PentestPipeline:
         # ENGINE: pipeline (legacy) — uses skills directly
         # ═══════════════════════════════════════════════════════════
         if engine in ("pipeline", "hybrid"):
-            # Phase 1: Recon
-            recon_data = await self._phase_recon(target, mode)
+            # In hybrid mode, reuse agent's recon data instead of re-running
+            if engine == "hybrid" and "agent_recon" in results.get("stages", {}):
+                recon_data = results["stages"]["agent_recon"]
+                # Convert agent recon format to pipeline format
+                if "subdomains" not in recon_data:
+                    recon_data["subdomains"] = recon_data.get("subdomains", [])
+                if "live_hosts" not in recon_data:
+                    recon_data["live_hosts"] = recon_data.get("live_hosts", [])
+                if "urls" not in recon_data:
+                    recon_data["urls"] = recon_data.get("urls", [])
+            else:
+                # Phase 1: Recon
+                recon_data = await self._phase_recon(target, mode)
             results["stages"]["recon"] = recon_data
 
             # Phase 1.5: Knowledge
@@ -983,24 +1002,29 @@ class PentestPipeline:
         # Phase 4: Validate
         validated = await self._phase_validate(results["findings"], results["chains"])
 
-        # Phase 4.5: Screenshot
-        validated = await self._phase_screenshot(target, validated)
+        # Separate validated findings from validated chains
+        validated_findings = [v for v in validated if v.get("type") != "Attack Chain"]
+        validated_chains = [v for v in validated if v.get("type") == "Attack Chain"]
 
-        # Phase 5: Report
-        report_data = await self._phase_report(target, platform, validated, results["chains"], tool_outputs)
+        # Phase 4.5: Screenshot
+        validated_findings = await self._phase_screenshot(target, validated_findings)
+
+        # Phase 5: Report — use validated chains, not raw chains
+        report_data = await self._phase_report(target, platform, validated_findings, validated_chains, tool_outputs)
         results["stages"]["report"] = report_data
         results["report"] = report_data.get("report")
         results["report_path"] = report_data.get("report_path")
         results["report_dir"] = report_data.get("report_dir")
 
         # Keep candidate findings for diagnostics, but only persist/report memory-safe findings.
-        candidate_findings = [f if isinstance(f, dict) else (f.to_dict() if hasattr(f, 'to_dict') else f) for f in validated]
-        reportable_findings = self.report_writer.filter_reportable(candidate_findings)
+        # filter_reportable was a legacy filter — quality_gate already handles CVSS/confidence checks.
+        candidate_findings = [f if isinstance(f, dict) else (f.to_dict() if hasattr(f, 'to_dict') else f) for f in validated_findings]
+        reportable_findings = candidate_findings
 
         # Phase 6: Memory
         results["candidate_findings"] = candidate_findings
         results["findings"] = reportable_findings
-        results["chains"] = [c if isinstance(c, dict) else (c.to_dict() if hasattr(c, 'to_dict') else c) for c in results["chains"]]
+        results["chains"] = [c if isinstance(c, dict) else (c.to_dict() if hasattr(c, 'to_dict') else c) for c in validated_chains]
         await self._phase_memory(results, results["findings"], target)
 
         # Collect agent statuses

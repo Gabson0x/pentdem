@@ -621,39 +621,15 @@ class ConcurrentHuntRunner:
 
     # ─── WAF/CDN Detection ──────────────────────────────────────
 
-    WAF_SIGNATURES = {
-        "cloudflare": ["cf-ray", "cf-cache-status", "server: cloudflare"],
-        "akamai": ["x-akamai-transformed", "server: akamaighost"],
-        "incapsula": ["x-iinfo", "incap-ses"],
-        "sucuri": ["x-sucuri-id", "server: sucuri"],
-        "barracuda": ["barra_counter_session"],
-    }
-
     def _detect_waf(self, headers: dict, status: int) -> str | None:
-        """Detect WAF/CDN from response headers. Returns WAF name or None."""
+        """Detect WAF/CDN from response headers. Uses SharedWAFBypass for consistent detection."""
         if status not in (403, 406, 429, 503):
             return None
-
-        headers_lower = {k.lower(): v.lower() for k, v in headers.items()}
-        server = headers_lower.get("server", "")
-
-        for waf_name, signatures in self.WAF_SIGNATURES.items():
-            for sig in signatures:
-                if ":" in sig:
-                    key, val = sig.split(":", 1)
-                    if headers_lower.get(key.strip()) == val.strip():
-                        return waf_name
-                elif sig in server:
-                    return waf_name
-
-        # Generic WAF detection: 403 with security-related headers
-        if status == 403:
-            security_headers = ["cf-ray", "x-sucuri-id", "x-iinfo", "x-akamai-transformed"]
-            for sh in security_headers:
-                if sh in headers_lower:
-                    return "unknown-waf"
-
-        return None
+        try:
+            result = self.shared_waf.fingerprint(headers, status)
+            return result.waf_name if result and result.waf_name else None
+        except Exception:
+            return None
 
     # ─── Vulnerability Checks ────────────────────────────────────
 

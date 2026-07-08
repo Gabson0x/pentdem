@@ -225,9 +225,9 @@ class AutonomousAgent:
         # Mock mode: return mock findings directly
         if self.mock:
             mock_nuclei = [
-                {"template-id": "spring-actuator", "info": {"name": "Spring Actuator", "severity": "critical"}, "matched-at": f"https://admin.{target}/actuator"},
-                {"template-id": "cors-misconfig", "info": {"name": "CORS Misconfiguration", "severity": "high"}, "matched-at": f"https://api.{target}/api/v1/users"},
-                {"template-id": "debug-mode", "info": {"name": "Debug Mode Enabled", "severity": "medium"}, "matched-at": f"https://dev.{target}/debug"},
+                {"template-id": "spring-actuator", "info": {"name": "Spring Actuator", "severity": "critical"}, "matched-at": f"https://{target}/actuator"},
+                {"template-id": "cors-misconfig", "info": {"name": "CORS Misconfiguration", "severity": "high"}, "matched-at": f"https://{target}/api/v1/users"},
+                {"template-id": "debug-mode", "info": {"name": "Debug Mode Enabled", "severity": "medium"}, "matched-at": f"https://{target}/debug"},
             ]
             results["nuclei"] = mock_nuclei
             for finding in mock_nuclei:
@@ -354,9 +354,9 @@ class AutonomousAgent:
         # Mock mode: return mock findings directly
         if self.mock:
             mock_findings = [
-                {"type": "sql_injection", "url": f"https://api.{target}/v1/users?id=1", "severity": "critical", "evidence": "SQL injection confirmed via error-based technique", "confidence": 0.9, "cvss_score": 9.8},
-                {"type": "xss", "url": f"https://www.{target}/search?q=test", "severity": "high", "evidence": "Reflected XSS in search parameter", "confidence": 0.85, "cvss_score": 6.1},
-                {"type": "ssti", "url": f"https://www.{target}/page?name=test", "severity": "critical", "evidence": "SSTI confirmed - math expression evaluated", "confidence": 0.9, "cvss_score": 9.8},
+                {"type": "sql_injection", "url": f"https://{target}/v1/users?id=1", "severity": "critical", "evidence": "SQL injection confirmed via error-based technique", "confidence": 0.9, "cvss_score": 9.8},
+                {"type": "xss", "url": f"https://{target}/search?q=test", "severity": "high", "evidence": "Reflected XSS in search parameter", "confidence": 0.85, "cvss_score": 6.1},
+                {"type": "ssti", "url": f"https://{target}/page?name=test", "severity": "critical", "evidence": "SSTI confirmed - math expression evaluated", "confidence": 0.9, "cvss_score": 9.8},
             ]
             for f in mock_findings:
                 self.state.findings.append(f)
