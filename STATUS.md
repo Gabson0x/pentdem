@@ -51,6 +51,17 @@
 - `skills/oauth_attack.py` - Redirect URI manipulation, state parameter bypass, token leakage, OAuth discovery
 - `skills/multi_stage_chain.py` - 5 chain types: SQLi→data, XSS→ATO, SSRF→cloud, IDOR→breach, redirect→OAuth theft
 
+### Phase 4 Enterprise Features (NEW)
+- `skills/kill_chain.py` - Kill-chain path builder — chains individual findings into full attack paths with MITRE/OWASP mapping
+- `skills/docker_isolation.py` - Docker isolation for safe tool execution (sqlmap, nuclei, nmap, ffuf, subfinder, httpx, dalfox, nikto, wfuzz)
+- `skills/real_tools.py` - Real tool grounding — actual nmap/sqlmap/nuclei/ffuf/subfinder/httpx execution with output parsing
+- `skills/session_persistence.py` - Save/load scan state across runs, session diffing, markdown export
+- `skills/multi_agent.py` - Multi-agent orchestrator — parallel recon/explore/validate/exploit agents
+- `skills/cicd_integration.py` - CI/CD integration — GitHub Actions, GitLab CI, Jira/GitHub issue generation, deployment gating
+- `skills/compliance_mapper.py` - Compliance mapping — MITRE ATT&CK + OWASP Top 10 2021 + CVSS scoring
+- `skills/architectural_memory.py` - Architectural memory — learn target structure across runs, trend analysis, test suggestions
+- `skills/web_dashboard.py` — Real-time web dashboard UI with WebSocket updates, findings browser, attack path visualization
+
 ### Deployment
 - `Dockerfile` - Docker image definition
 - `docker-compose.yml` - Docker Compose configuration
@@ -181,6 +192,15 @@ pipeline.py (orchestrator)
 ├── concurrent_hunt.py     # Parallel hunting with attack strategy
 ├── skills/shared_waf.py   # WAF fingerprinting & bypass
 ├── skills/attack_strategy.py # LLM-guided prioritization
+├── skills/kill_chain.py   # Kill-chain path builder (MITRE/OWASP)
+├── skills/docker_isolation.py # Sandboxed tool execution
+├── skills/real_tools.py   # Real nmap/sqlmap/nuclei/ffuf execution
+├── skills/session_persistence.py # Save/load scan state
+├── skills/multi_agent.py  # Parallel explore/validate/exploit agents
+├── skills/cicd_integration.py # GitHub Actions, GitLab CI, Jira
+├── skills/compliance_mapper.py # MITRE ATT&CK + OWASP + CVSS
+├── skills/architectural_memory.py # Learn target across runs
+├── skills/web_dashboard.py # Real-time monitoring UI
 └── Phase 3 Attack Classes:
     ├── skills/subdomain_takeover.py
     ├── skills/jwt_attack.py
@@ -195,7 +215,18 @@ pipeline.py (orchestrator)
 
 ## 📝 Recent Changes
 
-### v5.0 - Phase 3 Attack Classes (NEW)
+### v6.0 - Phase 4 Enterprise Features (NEW)
+- Added Kill-Chain Path Builder — chains findings into full attack paths with MITRE/OWASP mapping
+- Added Docker Isolation — sandboxed execution for 9 security tools (sqlmap, nuclei, nmap, ffuf, subfinder, httpx, dalfox, nikto, wfuzz)
+- Added Real Tool Grounding — actual tool execution with output parsing
+- Added Session Persistence — save/load scan state, session diffing, markdown export
+- Added Multi-Agent Orchestrator — parallel recon/explore/validate/exploit agents
+- Added CI/CD Integration — GitHub Actions, GitLab CI, Jira/GitHub issues, deployment gating
+- Added Compliance Mapper — MITRE ATT&CK + OWASP Top 10 2021 + CVSS scoring
+- Added Architectural Memory — learn target structure across runs, trend analysis, test suggestions
+- Added Web Dashboard — real-time monitoring UI with WebSocket updates
+
+### v5.0 - Phase 3 Attack Classes
 - Added 9 new attack skills (subdomain takeover, JWT, API discovery, mass assignment, cloud metadata, race conditions, credential harvesting, OAuth, multi-stage chains)
 - Added SharedWAFBypass — shared WAF module used by concurrent_hunt.py
 - Added LLMAttackStrategy — post-finding re-prioritization in concurrent_hunt.py
@@ -235,4 +266,5 @@ pipeline.py (orchestrator)
 1. Integration testing with real targets
 2. Deploy to Docker and test on server
 3. Add continuous monitoring / scheduled rescans
-4. Add CI/CD integration
+4. Add CI/CD integration testing
+5. Web dashboard deployment

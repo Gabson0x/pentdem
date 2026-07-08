@@ -54,6 +54,14 @@ from skills.oauth_attack import OAuthAttackSkill
 from skills.multi_stage_chain import MultiStageChainSkill
 from skills.shared_waf import SharedWAFBypass
 from skills.attack_strategy import LLMAttackStrategy
+from skills.kill_chain import KillChainBuilder
+from skills.docker_isolation import DockerIsolator
+from skills.real_tools import RealToolRunner
+from skills.session_persistence import SessionPersistence
+from skills.multi_agent import MultiAgentOrchestrator
+from skills.cicd_integration import CICDIntegration
+from skills.compliance_mapper import ComplianceMapper
+from skills.architectural_memory import ArchitecturalMemory
 from adaptive_engine import AdaptiveEngine
 from verifier import Verifier
 from concurrent_hunt import ConcurrentHuntRunner

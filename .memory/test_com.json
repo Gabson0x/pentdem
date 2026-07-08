@@ -1,0 +1,62 @@
+{
+  "target": "test.com",
+  "first_seen": "2026-07-08T11:11:07.966144",
+  "last_updated": "2026-07-08T11:11:07.966175",
+  "hosts": {
+    "test.com": {
+      "first_seen": "2026-07-08T11:11:07.966165",
+      "status": "active"
+    }
+  },
+  "services": {},
+  "endpoints": {},
+  "findings_history": [
+    {
+      "finding_type": "sqli",
+      "url": "https://x.com/api?id=1",
+      "param": "",
+      "severity": "critical",
+      "first_seen": "2026-07-08T11:11:07.966151",
+      "last_seen": "2026-07-08T11:11:07.966152",
+      "status": "open"
+    },
+    {
+      "finding_type": "ssrf",
+      "url": "https://x.com/fetch",
+      "param": "",
+      "severity": "critical",
+      "first_seen": "2026-07-08T11:11:07.966154",
+      "last_seen": "2026-07-08T11:11:07.966161",
+      "status": "open"
+    },
+    {
+      "finding_type": "credential_exposure",
+      "url": "https://x.com/.env",
+      "param": "",
+      "severity": "critical",
+      "first_seen": "2026-07-08T11:11:07.966163",
+      "last_seen": "2026-07-08T11:11:07.966164",
+      "status": "open"
+    }
+  ],
+  "tech_stack": [
+    "nginx"
+  ],
+  "waf_info": {},
+  "auth_mechanisms": [],
+  "attack_surface": {},
+  "patterns": {
+    "recurring_vulns": {
+      "sqli": 1,
+      "ssrf": 1,
+      "credential_exposure": 1
+    },
+    "hot_endpoints": {
+      "https://x.com/api?id=1": 1,
+      "https://x.com/fetch": 1,
+      "https://x.com/.env": 1
+    },
+    "vulnerable_params": {}
+  },
+  "scan_count": 1
+}
