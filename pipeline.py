@@ -88,7 +88,7 @@ class PentestPipeline:
         "idor", "ssrf", "xss", "sqli", "auth_bypass", "ssti",
         "open_redirect", "lfi", "command_injection", "nosqli",
         "graphql", "jwt", "deserialization", "path_traversal",
-        "race_condition",
+        "race_condition", "mass_assignment", "xxe", "prototype_pollution",
     ]
 
     # Agent registry with phase and risk tier
@@ -146,6 +146,15 @@ class PentestPipeline:
             "validate": ValidateSkill(mock=mock),
             "report": ReportSkill(mock=mock),
             "memory": MemorySkill(),
+            "race_condition": RaceConditionSkill(mock=mock),
+            "credential_harvest": CredentialHarvestingSkill(mock=mock),
+            "oauth": OAuthAttackSkill(mock=mock),
+            "mass_assignment": MassAssignmentSkill(mock=mock),
+            "jwt": JWTAttackSkill(mock=mock),
+            "cloud_metadata": CloudMetadataSkill(mock=mock),
+            "subdomain_takeover": SubdomainTakeoverSkill(mock=mock),
+            "api_discovery": APIDiscoverySkill(mock=mock),
+            "multi_stage": MultiStageChainSkill(mock=mock),
         }
 
         # Shorthand

@@ -40,13 +40,19 @@ class ReconSkill(BaseSkill):
 
         data = {}
         findings = []
+        import time, logging
+        log = logging.getLogger("recon")
+        t_start = time.time()
 
         # Phase 1: Subdomain enumeration + URL crawling in parallel
+        log.info(f"[{target}] Phase 1: subdomain enumeration")
         subdomain_task = self._enumerate_subdomains(target)
         crawl_task = self._crawl_public_sources(target) if mode == "full" else None
 
         subdomains = await subdomain_task
+        data["subdomains"] = subdomains
         data["subdomains_raw"] = subdomains
+        log.info(f"[{target}] Phase 1 complete: {len(subdomains)} subdomains ({time.time()-t_start:.1f}s)")
 
         if crawl_task:
             public_urls = await crawl_task
@@ -55,24 +61,36 @@ class ReconSkill(BaseSkill):
             public_urls = []
 
         # Phase 2: Live host detection
+        t_phase2 = time.time()
+        log.info(f"[{target}] Phase 2: live host detection")
         all_hosts = list(set(subdomains + [target]))
         live_hosts = await self._detect_live_hosts(all_hosts)
         data["live_hosts"] = live_hosts
 
         live_urls = [h.get("url", f"https://{h['host']}") for h in live_hosts if h.get("alive")]
+        log.info(f"[{target}] Phase 2 complete: {len(live_urls)} live hosts ({time.time()-t_phase2:.1f}s)")
 
-        # Phase 3: Deep crawling + directory fuzzing
+        # Phase 3: Deep crawling + directory fuzzing (parallelized across hosts)
+        deep_urls = []
+        fuzzed = []
         if mode == "full" and live_urls:
-            deep_tasks = await asyncio.gather(
-                self._crawl_deep(live_urls),
-                self._fuzz_directories(live_urls),
-                return_exceptions=True,
-            )
-            deep_urls = deep_tasks[0] if not isinstance(deep_tasks[0], Exception) else []
-            fuzzed = deep_tasks[1] if not isinstance(deep_tasks[1], Exception) else []
-        else:
-            deep_urls = []
-            fuzzed = []
+            t_phase3 = time.time()
+            log.info(f"[{target}] Phase 3: crawling + fuzzing {len(live_urls)} hosts")
+            # Parallelize across hosts: each host gets its own katana + ffuf tasks
+            host_tasks = []
+            for url in live_urls[:5]:  # cap at 5 hosts
+                host_tasks.append(self._crawl_deep_single(url))
+                host_tasks.append(self._fuzz_single_host(url))
+            results = await asyncio.gather(*host_tasks, return_exceptions=True)
+            for r in results:
+                if isinstance(r, Exception):
+                    continue
+                if isinstance(r, dict):
+                    deep_urls.extend(r.get("deep", []))
+                    fuzzed.extend(r.get("fuzz", []))
+                elif isinstance(r, list):
+                    deep_urls.extend(r)
+            log.info(f"[{target}] Phase 3 complete: {len(deep_urls)} crawled + {len(fuzzed)} fuzzed ({time.time()-t_phase3:.1f}s)")
 
         all_urls = list(set(public_urls + deep_urls + fuzzed))
         data["urls"] = all_urls
@@ -105,7 +123,6 @@ class ReconSkill(BaseSkill):
             """Synchronous LLM call for wordlist generation."""
             try:
                 import httpx as req
-                # Use the cheapest available model
                 api_key = __import__("os").getenv("GLM_API_KEY", "")
                 if api_key and not api_key.startswith("your_"):
                     resp = req.post(
@@ -117,7 +134,7 @@ class ReconSkill(BaseSkill):
                             "temperature": 0.1,
                             "max_tokens": 1000,
                         },
-                        timeout=30,
+                        timeout=10,
                     )
                     return resp.json()["choices"][0]["message"]["content"]
             except Exception:
@@ -132,9 +149,15 @@ class ReconSkill(BaseSkill):
         for path in ctx.discovered_paths:
             record_hit(wl_conn, path, ",".join(sorted(tech_stack)), 200)
 
-        # Phase 7: LLM analysis
-        analysis = await self._analyze_target(target, data)
+        # Phase 7: LLM analysis (with timeout)
+        log.info(f"[{target}] Phase 7: LLM analysis")
+        try:
+            analysis = await asyncio.wait_for(self._analyze_target(target, data), timeout=15)
+        except asyncio.TimeoutError:
+            analysis = {"raw": "LLM analysis timed out", "parsed": False}
         data["analysis"] = analysis
+
+        log.info(f"[{target}] Recon complete: {len(all_urls)} URLs, {len(findings)} findings ({time.time()-t_start:.1f}s)")
 
         return SkillResult(
             success=True,
@@ -191,7 +214,7 @@ class ReconSkill(BaseSkill):
     # ─── Tool Wrappers ──────────────────────────────────────────
 
     async def _enumerate_subdomains(self, target: str) -> list:
-        result = await self.tools.run("subfinder", ["-d", target, "-silent", "-timeout", "30"])
+        result = await self.tools.run("subfinder", ["-d", target, "-silent", "-timeout", "10"], timeout=15)
         if result["success"] and result["stdout"].strip():
             return [line.strip() for line in result["stdout"].splitlines() if line.strip()]
         return [target]
@@ -259,7 +282,7 @@ class ReconSkill(BaseSkill):
                     "title": entry.get("title", ""),
                     "tech": entry.get("tech", []),
                     "webserver": entry.get("webserver", ""),
-                    "alive": 200 <= entry.get("status_code", 0) < 500,
+                    "alive": entry.get("status_code", 0) > 0,
                     "content_type": entry.get("content_type", ""),
                 })
             except json.JSONDecodeError:
@@ -272,77 +295,65 @@ class ReconSkill(BaseSkill):
                     })
         return hosts
 
-    async def _crawl_deep(self, urls: list) -> list:
-        if not urls:
-            return []
+    _FUZZ_WORDLIST = "\n".join([
+        "admin", "administrator", "login", "logout", "api", "api/v1", "api/v2",
+        "dashboard", "portal", "console", "manage", "management",
+        "uploads", "upload", "files", "assets", "static", "media",
+        "test", "testing", "dev", "staging", "demo", "sandbox",
+        "internal", "private", "secret", "hidden", "temp", "tmp",
+        ".env", ".env.local", ".env.production",
+        "config", "config.php", "config.json", "config.yml", "config.yaml",
+        "settings.py", "settings.json", "web.config", "app.config",
+        ".git", ".git/config", ".git/HEAD", ".gitignore",
+        "robots.txt", "sitemap.xml", "crossdomain.xml",
+        "server-status", "server-info", "phpinfo.php", "info.php",
+        "swagger.json", "swagger-ui.html", "openapi.json", "graphql",
+        "actuator", "actuator/health", "actuator/env",
+        "debug", "trace", "elmah.axd",
+        "wp-admin", "wp-content", "wp-includes", "wp-login.php",
+        "wp-config.php", "wp-json", "xmlrpc.php",
+    ])
 
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            f.write('\n'.join(urls))
-            tmp_path = f.name
-
+    async def _crawl_deep_single(self, url: str) -> list:
+        """Crawl a single URL with katana (15s timeout)."""
         try:
             result = await self.tools.run("katana", [
-                "-list", tmp_path,
-                "-silent", "-jc", "-kf",
-                "-timeout", "10",
-            ])
+                "-u", url, "-d", "2", "-silent", "-jc", "-kf",
+                "-timeout", "8",
+            ], timeout=15)
             if result["success"] and result["stdout"].strip():
                 return [u.strip() for u in result["stdout"].splitlines() if u.strip()]
-        finally:
-            import os
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+        except Exception:
+            pass
+        return []
 
-        return urls
-
-    async def _fuzz_directories(self, urls: list) -> list:
+    async def _fuzz_single_host(self, url: str) -> list:
+        """Fuzz a single host with ffuf (10s timeout)."""
         discovered = []
-
-        wordlist_content = "\n".join([
-            "admin", "administrator", "login", "logout", "api", "api/v1", "api/v2",
-            "dashboard", "portal", "console", "manage", "management",
-            "uploads", "upload", "files", "assets", "static", "media",
-            "test", "testing", "dev", "staging", "demo", "sandbox",
-            "internal", "private", "secret", "hidden", "temp", "tmp",
-            ".env", ".env.local", ".env.production",
-            "config", "config.php", "config.json", "config.yml", "config.yaml",
-            "settings.py", "settings.json", "web.config", "app.config",
-            ".git", ".git/config", ".git/HEAD", ".gitignore",
-            "robots.txt", "sitemap.xml", "crossdomain.xml",
-            "server-status", "server-info", "phpinfo.php", "info.php",
-            "swagger.json", "swagger-ui.html", "openapi.json", "graphql",
-            "actuator", "actuator/health", "actuator/env",
-            "debug", "trace", "elmah.axd",
-            "wp-admin", "wp-content", "wp-includes", "wp-login.php",
-            "wp-config.php", "wp-json", "xmlrpc.php",
-        ])
+        parsed = urlparse(url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
 
         import tempfile
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            f.write(wordlist_content)
+            f.write(self._FUZZ_WORDLIST)
             tmp_path = f.name
 
         try:
-            for url in urls[:3]:
-                parsed = urlparse(url)
-                base = f"{parsed.scheme}://{parsed.netloc}"
-                result = await self.tools.run("ffuf", [
-                    "-u", f"{base}/FUZZ",
-                    "-w", tmp_path,
-                    "-t", "20",
-                    "-mc", "200,204,301,302,307,401,403,405,500",
-                    "-s",
-                    "-timeout", "10",
-                ])
-                if result["success"] and result["stdout"].strip():
-                    for line in result["stdout"].splitlines():
-                        if line.strip():
-                            word = line.split()[0]
-                            discovered.append(f"{base}/{word}")
-                discovered.append(url)
+            result = await self.tools.run("ffuf", [
+                "-u", f"{base}/FUZZ",
+                "-w", tmp_path,
+                "-t", "20",
+                "-mc", "200,204,301,302,307,401,403,405,500",
+                "-s",
+                "-timeout", "8",
+            ], timeout=10)
+            if result["success"] and result["stdout"].strip():
+                for line in result["stdout"].splitlines():
+                    if line.strip():
+                        word = line.split()[0]
+                        discovered.append(f"{base}/{word}")
+        except Exception:
+            pass
         finally:
             import os
             try:
@@ -351,6 +362,30 @@ class ReconSkill(BaseSkill):
                 pass
 
         return discovered
+
+    async def _crawl_deep(self, urls: list) -> list:
+        """Legacy: crawl multiple URLs (kept for backward compat)."""
+        if not urls:
+            return []
+        tasks = [self._crawl_deep_single(u) for u in urls[:3]]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        out = []
+        for r in results:
+            if isinstance(r, list):
+                out.extend(r)
+        return out
+
+    async def _fuzz_directories(self, urls: list) -> list:
+        """Legacy: fuzz multiple hosts (kept for backward compat)."""
+        if not urls:
+            return []
+        tasks = [self._fuzz_single_host(u) for u in urls[:3]]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        out = []
+        for r in results:
+            if isinstance(r, list):
+                out.extend(r)
+        return out
 
     def _extract_attack_surface(self, urls: list, target: str) -> dict:
         endpoints = set()

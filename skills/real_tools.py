@@ -104,7 +104,7 @@ class RealToolRunner:
         script_pattern = r'\|_(.+?):\s*(.+)'
         for match in re.finditer(script_pattern, output):
             script_name, result = match.groups()
-            if any(vuln in result.lower() for v in ["vuln", "vulnerable", "exploit", "cve"]):
+            if any(v in result.lower() for v in ["vuln", "vulnerable", "exploit", "cve"]):
                 findings.append({
                     "type": "nmap_script_finding",
                     "script": script_name,

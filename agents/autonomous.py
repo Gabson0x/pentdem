@@ -160,22 +160,28 @@ class AutonomousAgent:
                 f.write("\n".join(results["subdomains"]))
 
             httpx_result = await self.tools.run("httpx", [
-                "-l", subs_file, "-silent", "-status-code", "-title", "-tech-detect"
+                "-l", subs_file, "-silent", "-status-code", "-title", "-tech-detect", "-json"
             ])
             if httpx_result["success"]:
                 live_hosts = []
                 technologies = []
                 for line in httpx_result["stdout"].strip().split("\n"):
-                    if line.strip():
+                    if not line.strip():
+                        continue
+                    try:
+                        import json
+                        entry = json.loads(line)
+                        url = entry.get("url", entry.get("host", ""))
+                        if url:
+                            live_hosts.append(url)
+                        tech = entry.get("tech", [])
+                        if tech:
+                            technologies.extend(tech)
+                    except Exception:
+                        # Fallback: text parsing
                         parts = line.split()
                         if parts:
                             live_hosts.append(parts[0])
-                            # Extract tech info if present
-                            if "[" in line:
-                                tech_start = line.find("[")
-                                tech_end = line.find("]", tech_start)
-                                if tech_end > tech_start:
-                                    technologies.append(line[tech_start+1:tech_end])
                 results["live_hosts"] = live_hosts
                 results["technologies"] = technologies
                 self.state.live_hosts = live_hosts
@@ -186,18 +192,22 @@ class AutonomousAgent:
         # Step 3: URL discovery (parallel)
         await self._emit("recon", "Discovering URLs...", 0.35)
         katana_result = await self.tools.run("katana", [
-            "-u", f"https://{target}", "-d", "3", "-silent"
-        ])
+            "-u", f"https://{target}", "-d", "3", "-silent", "-jc", "-kf",
+            "-timeout", "10",
+        ], timeout=20)
         if katana_result["success"]:
             urls = [u.strip() for u in katana_result["stdout"].strip().split("\n") if u.strip()]
             results["urls"] = urls
             self.state.urls = urls
             self.state.tool_outputs["katana"] = katana_result["stdout"]
 
-        # Step 4: LLM analysis of recon data
+        # Step 4: LLM analysis of recon data (with timeout)
         if self.model and results:
             await self._emit("recon", "Analyzing recon data with AI...", 0.4)
-            analysis = await self._llm_analyze_recon(results)
+            try:
+                analysis = await asyncio.wait_for(self._llm_analyze_recon(results), timeout=15)
+            except asyncio.TimeoutError:
+                analysis = {"recommendations": [], "interesting_findings": []}
             results["ai_analysis"] = analysis
             if analysis.get("interesting_findings"):
                 self.state.learned_patterns.extend(analysis["interesting_findings"])

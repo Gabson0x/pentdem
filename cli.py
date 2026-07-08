@@ -185,8 +185,8 @@ async def main():
     print(f"  {color('Time:', 'yellow')}   {duration:.1f}s")
     print(f"  {color('Mode:', 'yellow')}   {mode}")
 
-    # Show recon diagnostics
-    recon_data = results.get("stages", {}).get("recon", {})
+    # Show recon diagnostics (agent engine stores as agent_recon, pipeline as recon)
+    recon_data = results.get("stages", {}).get("agent_recon", results.get("stages", {}).get("recon", {}))
     subdomains = len(recon_data.get("subdomains", []))
     live_hosts = len(recon_data.get("live_hosts", []))
     urls = len(recon_data.get("urls", []))

