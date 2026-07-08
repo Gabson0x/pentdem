@@ -18,10 +18,19 @@ from adaptive_wordlist_engine import (
 class ReconSkill(BaseSkill):
     """Adaptive recon skill — context-aware, memory-backed, multi-model."""
 
-    def __init__(self, mock: bool = False):
+    def __init__(self, mock: bool = False, use_docker: bool = False):
         super().__init__(mock)
         self.tools = ToolExecutor(mock=mock)
+        self.use_docker = use_docker
+        self._docker = None
         self._wl_conn = None
+
+        if use_docker:
+            try:
+                from skills.docker_isolation import DockerIsolator
+                self._docker = DockerIsolator()
+            except Exception:
+                self.use_docker = False
 
     def _get_wl_conn(self):
         if self._wl_conn is None:
@@ -213,8 +222,28 @@ class ReconSkill(BaseSkill):
 
     # ─── Tool Wrappers ──────────────────────────────────────────
 
+    async def _run_tool(self, tool: str, args: list, timeout: int = None) -> dict:
+        """Run a tool via Docker if configured, else locally."""
+        if self._docker and self.use_docker:
+            try:
+                if tool == "subfinder":
+                    result = await self._docker.run_subfinder(args[1] if len(args) > 1 else "")
+                    return {"success": result.get("success", False), "stdout": result.get("output", ""), "stderr": ""}
+                elif tool == "nuclei":
+                    result = await self._docker.run_nuclei(args[0] if args else "")
+                    return {"success": result.get("success", False), "stdout": result.get("output", ""), "stderr": ""}
+                elif tool == "ffuf":
+                    result = await self._docker.run_ffuf(args[1] if len(args) > 1 else "", args[3] if len(args) > 3 else "")
+                    return {"success": result.get("success", False), "stdout": result.get("output", ""), "stderr": ""}
+                elif tool == "nmap":
+                    result = await self._docker.run_nmap(args[0] if args else "")
+                    return {"success": result.get("success", False), "stdout": result.get("output", ""), "stderr": ""}
+            except Exception:
+                pass  # Fall back to local
+        return await self.tools.run(tool, args, timeout=timeout)
+
     async def _enumerate_subdomains(self, target: str) -> list:
-        result = await self.tools.run("subfinder", ["-d", target, "-silent", "-timeout", "10"], timeout=15)
+        result = await self._run_tool("subfinder", ["-d", target, "-silent", "-timeout", "10"], timeout=15)
         if result["success"] and result["stdout"].strip():
             return [line.strip() for line in result["stdout"].splitlines() if line.strip()]
         return [target]
@@ -317,7 +346,7 @@ class ReconSkill(BaseSkill):
     async def _crawl_deep_single(self, url: str) -> list:
         """Crawl a single URL with katana (15s timeout)."""
         try:
-            result = await self.tools.run("katana", [
+            result = await self._run_tool("katana", [
                 "-u", url, "-d", "2", "-silent", "-jc", "-kf",
                 "-timeout", "8",
             ], timeout=15)
@@ -339,7 +368,7 @@ class ReconSkill(BaseSkill):
             tmp_path = f.name
 
         try:
-            result = await self.tools.run("ffuf", [
+            result = await self._run_tool("ffuf", [
                 "-u", f"{base}/FUZZ",
                 "-w", tmp_path,
                 "-t", "20",

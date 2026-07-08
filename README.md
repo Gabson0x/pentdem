@@ -5,26 +5,26 @@ Autonomous AI-powered pentesting platform that deploys coordinated agents for re
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    PIPELINE (pipeline.py)                            │
-│  Orchestrator — coordinates agents, validates, reports               │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│  ENGINE: agent (default)        ENGINE: pipeline (legacy)           │
-│  ┌─────────────────────────┐    ┌─────────────────────────┐        │
-│  │  AutonomousAgent        │    │  Skills (recon, hunt,   │        │
-│  │  - 34 security tools    │    │  chain, validate, etc.) │        │
-│  │  - LLM analysis         │    │  - Parallel vuln class  │        │
-│  │  - WAF bypass engine    │    │    hunting              │        │
-│  └─────────────────────────┘    └─────────────────────────┘        │
-│                         │                                           │
-│                    Merge findings                                   │
-│                         ↓                                           │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │  Quality Gate → Kill Chain Builder → Compliance Mapper       │   │
-│  │  → Report → Session Persistence → Dashboard                  │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         PIPELINE (pipeline.py)                          │
+│              Orchestrator — coordinates agents, validates, reports       │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ENGINE: agent (default)           ENGINE: pipeline (legacy)            │
+│  ┌───────────────────────────┐     ┌───────────────────────────┐       │
+│  │  AutonomousAgent          │     │  Skills (recon, hunt,     │       │
+│  │  - 34 security tools      │     │  chain, validate, etc.)   │       │
+│  │  - LLM analysis           │     │  - Parallel vuln class    │       │
+│  │  - WAF bypass engine      │     │    hunting                │       │
+│  └───────────────────────────┘     └───────────────────────────┘       │
+│                          │                                              │
+│                     Merge findings                                      │
+│                          ↓                                              │
+│  ┌────────────────────────────────────────────────────────────────┐     │
+│  │  Quality Gate → Kill Chain Builder → Compliance Mapper         │     │
+│  │  → Report → Session Persistence → Dashboard                    │     │
+│  └────────────────────────────────────────────────────────────────┘     │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Quick Start
@@ -50,6 +50,9 @@ python cli.py example.com full hackerone --mock
 # Run with autonomous agent (default)
 python cli.py example.com full hackerone
 
+# Run with Docker isolation (sandboxed tools)
+python cli.py example.com full hackerone --docker
+
 # Run with legacy pipeline
 python cli.py example.com full hackerone --engine pipeline
 
@@ -60,49 +63,52 @@ python cli.py example.com full hackerone --engine hybrid
 python -m agents.autonomous example.com --mock
 ```
 
-## How It Runs (v6.0)
+## Pipeline Flow
 
-The process is **similar but enhanced**:
-
-### Before (v3.0)
+### Agent Engine (default)
 ```
-1. Recon → 2. Hunt (15 vuln classes) → 3. Validate → 4. Report
+recon → scan → fuzz → exploit → chain → quality_gate → validate → report
 ```
 
-### Now (v6.0)
+### Pipeline Engine
 ```
-1. Recon → 2. Hunt (15 vuln classes + 9 attack classes) →
-3. Kill Chain Builder (chains findings into attack paths) →
-4. Quality Gate (rejects weak findings) →
-5. Compliance Mapper (MITRE/OWASP/CVSS) →
-6. Report → 7. Session Persistence → 8. Dashboard
+recon → learn → hunt (15 vuln classes parallel)
+  → advanced_hunt (8 attack skills parallel + WAF fingerprinting)
+  → quality_gate → chain → validate → screenshot → report → memory
 ```
 
-**Key differences:**
-- **24 attack classes** (was 15) — added JWT, OAuth, subdomain takeover, cloud metadata, race conditions, etc.
-- **Kill-chain builder** — chains individual findings into full attack paths
-- **Quality gate** — single chokepoint rejects weak findings before report
-- **Session persistence** — saves scan state, can resume/compare across runs
-- **Docker isolation** — runs dangerous tools (sqlmap, nuclei) in containers
-- **Real tool grounding** — actually runs nmap/sqlmap/nuclei/ffuf (not mocks)
-- **Web dashboard** — real-time monitoring UI
+### Phase Details
+
+| Phase | Description | Time |
+|-------|-------------|------|
+| **recon** | Subdomain enum, live hosts, URL discovery, JS analysis | ~30s |
+| **learn** | Load disclosed reports, build knowledge base | ~5s |
+| **hunt** | 15 vuln classes in parallel (IDOR, SSRF, XSS, SQLi, etc.) | ~60s |
+| **advanced_hunt** | JWT, OAuth, mass assignment, race condition, cloud metadata, subdomain takeover, credential harvesting, API discovery, WAF bypass | ~30s |
+| **quality_gate** | Evidence consistency check, dedup, reject weak findings | ~1s |
+| **chain** | Chain findings into attack paths, MITRE ATT&CK mapping | ~5s |
+| **validate** | 7-Question Gate, confirmation loops | ~10s |
+| **report** | Generate Markdown report with CVSS scoring | ~5s |
 
 ## CLI Usage
 
 ```bash
 # Full scan (24 vuln classes, ~2min mock)
-python cli.py <target> full <platform> [--mock]
+python cli.py <target> full <platform> [--mock] [--docker]
 
 # Quick scan (top 6 vuln classes)
-python cli.py <target> quick [--mock]
+python cli.py <target> quick [--mock] [--docker]
 
 # Targeted scan (core 4: IDOR, SSRF, XSS, SQLi)
-python cli.py <target> targeted [--mock]
+python cli.py <target> targeted [--mock] [--docker]
 
 # Engine selection
 python cli.py <target> full hackerone --engine agent      # Autonomous agent (default)
 python cli.py <target> full hackerone --engine pipeline   # Legacy pipeline
 python cli.py <target> full hackerone --engine hybrid     # Both engines
+
+# Docker isolation (sandboxed tool execution)
+python cli.py <target> full hackerone --docker
 
 # Source code analysis
 python cli.py github.com/org/repo full github --source repo
@@ -121,27 +127,90 @@ python cli.py knowledge search <q>
 | Engine | How it works | Best for |
 |--------|--------------|----------|
 | **agent** | Uses 34 tools + LLM analyzes after each phase | Full automation, real tool execution |
-| **pipeline** | Uses skills with parallel vuln class testing | Deep analysis, existing infrastructure |
-| **hybrid** | Runs agent for tools, pipeline for analysis | Maximum coverage, double validation |
+| **pipeline** | Uses skills with parallel vuln class testing + advanced hunt | Deep analysis, maximum coverage |
+| **hybrid** | Runs agent for tools, pipeline for analysis | Double validation |
 
 ## Attack Classes (24)
 
-### Core (15)
+### Core (15) — tested in parallel during hunt phase
 IDOR, SSRF, XSS, SQLi, Auth Bypass, SSTI, Open Redirect, LFI, Command Injection, NoSQLi, GraphQL, JWT, Deserialization, Path Traversal, Race Condition
 
-### Phase 3 Additions (9)
+### Advanced (9) — tested in parallel during advanced hunt phase
 Subdomain Takeover, JWT Attack Suite, API Discovery, Mass Assignment, Cloud Metadata, Race Conditions, Credential Harvesting, OAuth/OIDC, Multi-Stage Chains
 
 ## Key Features
 
-### Kill-Chain Path Builder
-Chains individual findings into full attack paths:
+### LLM-Guided Attack Strategy
+Real AI decides what to test next based on response patterns:
+- Analyzes status codes, response times, body sizes, error patterns
+- Re-prioritizes vuln classes based on what's likely to succeed
+- Adapts strategy mid-scan based on findings
+
+### Multi-Stage Exploitation Chains
+Pivots from initial finding to full attack path:
 ```
 SQLi (entry) → Credential Extraction → Privilege Escalation → Full Compromise
 ```
 Maps each path to MITRE ATT&CK techniques and OWASP Top 10 categories.
 
-### Quality Gate
+### Real-Time WAF Fingerprinting & Auto-Bypass
+Detects and bypasses Web Application Firewalls:
+- 9 WAF signatures (Cloudflare, Akamai, Incapsula, etc.)
+- Auto-bypass techniques for each WAF type
+- Shared across all skills via `SharedWAFBypass`
+
+### Credential Harvesting from Responses
+Extracts credentials, tokens, and secrets from HTTP responses:
+- Regex patterns for API keys, tokens, passwords
+- JWT token detection and analysis
+- Hardcoded credential detection
+
+### API Discovery via JavaScript Analysis
+Discovers hidden endpoints, secrets, and tokens in JavaScript files:
+- Endpoint extraction from JS code
+- Secret/token detection
+- Parameter discovery
+
+### Mass Assignment / HTTP Parameter Pollution
+Tests for mass assignment vulnerabilities:
+- Parameter injection (admin, role, price, etc.)
+- HPP (HTTP Parameter Pollution) testing
+- Content-type manipulation
+
+### JWT Attack Suite
+Comprehensive JWT testing:
+- Algorithm confusion (none, HS256→RS256)
+- Key confusion attacks
+- Header injection
+- Token leakage detection
+
+### OAuth/OIDC Attack Flows
+Tests OAuth/OIDC implementations:
+- redirect_uri manipulation
+- State parameter bypass
+- PKCE downgrade attacks
+- Token leakage via referer
+
+### Subdomain Takeover Detection
+Detects subdomain takeover opportunities:
+- CNAME record analysis
+- Dangling DNS detection
+- Service fingerprinting (GitHub Pages, Heroku, etc.)
+
+### Cloud Metadata Exploitation
+Tests for cloud metadata exposure:
+- AWS IMDSv1/v2 endpoints
+- GCP metadata server
+- Azure Instance Metadata Service
+- SSRF to cloud metadata pivoting
+
+### Race Condition Detection
+Detects race conditions via concurrent requests:
+- Sends 10+ concurrent requests
+- Detects TOCTOU (Time-of-Check Time-of-Use) bugs
+- Identifies duplicate processing
+
+### Report Quality Gate
 Single chokepoint that rejects weak findings:
 - Checks request/evidence consistency
 - Validates evidence quality (raw proof, not generated)
@@ -153,6 +222,7 @@ Runs dangerous tools in sandboxed containers:
 - sqlmap, nuclei, nmap, ffuf, subfinder, httpx, dalfox, nikto, wfuzz
 - Resource limits (CPU, memory, time)
 - Network isolation
+- Enable with `--docker` flag
 
 ### Real Tool Grounding
 Actually runs real security tools:
@@ -199,10 +269,10 @@ Real-time monitoring UI:
 ## File Structure
 
 ```
-├── cli.py                    # CLI entry point
+├── cli.py                    # CLI entry point (--docker, --engine, --mock)
 ├── main.py                   # Daemon entry point
 ├── server.py                 # FastAPI server
-├── pipeline.py               # Swarm orchestrator (merged with agent)
+├── pipeline.py               # Swarm orchestrator (agent + pipeline engines)
 ├── adaptive_engine.py        # Mid-run test adaptation
 ├── concurrent_hunt.py        # Parallel hunt runner (with attack strategy)
 ├── ai_decision_engine.py     # Autonomous decisions (deeper/switch/stop)
@@ -218,7 +288,7 @@ Real-time monitoring UI:
 │   ├── catalog.py            # 34 security tools catalog
 │   └── payloads.py           # Real payload DB (11+ classes)
 ├── skills/
-│   ├── recon/                # Subdomain enum, live hosts, URLs
+│   ├── recon/                # Subdomain enum, live hosts, URLs (Docker-aware)
 │   ├── hunt/                 # 15 vuln class hunters (with EvidenceCollector)
 │   ├── chain/                # Attack chain builder
 │   ├── validate/             # 7-Question Gate (with evidence pre-check)
@@ -231,7 +301,7 @@ Real-time monitoring UI:
 │   ├── shared_waf.py         # Shared WAF fingerprinting & bypass
 │   ├── attack_strategy.py    # LLM-guided attack prioritization
 │   ├── kill_chain.py         # Kill-chain path builder (MITRE/OWASP)
-│   ├── docker_isolation.py   # Sandboxed tool execution
+│   ├── docker_isolation.py   # Sandboxed tool execution (9 containers)
 │   ├── real_tools.py         # Real nmap/sqlmap/nuclei/ffuf execution
 │   ├── session_persistence.py # Save/load scan state
 │   ├── multi_agent.py        # Parallel explore/validate/exploit agents
@@ -246,17 +316,16 @@ Real-time monitoring UI:
 │   ├── screenshot.py         # PoC evidence cards
 │   ├── evidence.py           # Timestamped evidence files
 │   ├── mitre_mapper.py       # ATT&CK technique mapping
-│   └── threat_analyzer.py    # FP detection, confidence scoring
-│   └── Phase 3 Attack Classes:
-│       ├── subdomain_takeover.py
-│       ├── jwt_attack.py
-│       ├── api_discovery.py
-│       ├── mass_assignment.py
-│       ├── cloud_metadata.py
-│       ├── race_condition.py
-│       ├── credential_harvesting.py
-│       ├── oauth_attack.py
-│       └── multi_stage_chain.py
+│   ├── threat_analyzer.py    # FP detection, confidence scoring
+│   ├── subdomain_takeover.py # CNAME/dangling detection
+│   ├── jwt_attack.py         # JWT alg:none, key confusion, injection
+│   ├── api_discovery.py      # JS endpoint/secret discovery
+│   ├── mass_assignment.py    # Parameter injection + HPP
+│   ├── cloud_metadata.py     # AWS/GCP/Azure metadata endpoints
+│   ├── race_condition.py     # Concurrent request race detection
+│   ├── credential_harvesting.py # Regex credential extraction
+│   ├── oauth_attack.py       # OAuth redirect_uri, state, PKCE
+│   └── multi_stage_chain.py  # Multi-step exploitation chains
 ├── reports/{target}/         # Per-target report folders
 │   ├── Main_Report.md
 │   ├── findings/
@@ -291,6 +360,18 @@ Total: <$3/month (all free tiers)
 - [x] Compliance mapping (MITRE/OWASP)
 - [x] Web dashboard
 - [x] Multi-agent orchestration
+- [x] Docker isolation (`--docker` flag)
+- [x] LLM-guided attack strategy
+- [x] Multi-stage exploitation chains
+- [x] WAF fingerprinting & auto-bypass
+- [x] Credential harvesting
+- [x] API discovery via JS analysis
+- [x] Mass assignment / HPP
+- [x] JWT attack suite
+- [x] OAuth/OIDC attack flows
+- [x] Subdomain takeover detection
+- [x] Cloud metadata exploitation
+- [x] Race condition detection
 - [ ] Continuous monitoring / scheduled rescans
 - [ ] Automated patch suggestions
 - [ ] PR review / shift-left capability

@@ -120,6 +120,7 @@ async def main():
     mode = sys.argv[2] if len(sys.argv) > 2 else "full"
     platform = sys.argv[3] if len(sys.argv) > 3 else "hackerone"
     mock_mode = "--mock" in sys.argv
+    use_docker = "--docker" in sys.argv
 
     # Parse --source flag
     source_type = "url"
@@ -143,10 +144,11 @@ async def main():
     print(f"  {color('Platform:', 'yellow')}  {platform}")
     print(f"  {color('Source:', 'yellow')}    {source_type}")
     print(f"  {color('Engine:', 'yellow')}    {engine}")
+    print(f"  {color('Docker:', 'yellow')}    {'Yes' if use_docker else 'No'}")
     print(f"  {color('Mock:', 'yellow')}      {'Yes' if mock_mode else 'No'}")
     print()
 
-    pipeline = PentestPipeline(config={"mock_mode": mock_mode})
+    pipeline = PentestPipeline(config={"mock_mode": mock_mode, "use_docker": use_docker})
 
     last_message = [None]
 

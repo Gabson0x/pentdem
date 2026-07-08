@@ -108,6 +108,7 @@ class PentestPipeline:
     def __init__(self, config: Dict = None):
         self.config = config or {}
         mock = self.config.get("mock_mode", False)
+        self.use_docker = self.config.get("use_docker", False)
 
         # Infrastructure (scope_guard before skills)
         self.scope_guard: Optional[ScopeGuard] = None
@@ -140,7 +141,7 @@ class PentestPipeline:
 
         self.skills = {
             "learn": KnowledgeSkill(mock=mock),
-            "recon": ReconSkill(mock=mock),
+            "recon": ReconSkill(mock=mock, use_docker=self.use_docker),
             "hunt": HuntSkill(mock=mock, scope_guard=self.scope_guard),
             "chain": ChainSkill(mock=mock),
             "validate": ValidateSkill(mock=mock),
@@ -439,6 +440,109 @@ class PentestPipeline:
 
         await self._emit_progress("hunt", "completed", 0.55, {"findings": len(confirmed_findings)})
         return confirmed_findings
+
+    async def _phase_advanced_hunt(
+        self,
+        target: str,
+        mode: str,
+        recon_data: dict,
+    ) -> List[Finding]:
+        """
+        Phase 2.5: Advanced attack skills — runs specialized attack modules in parallel.
+        JWT, OAuth, mass assignment, race condition, cloud metadata, subdomain takeover,
+        credential harvesting, API discovery, WAF bypass.
+        """
+        all_urls = recon_data.get("urls", [])
+        live_hosts = recon_data.get("live_hosts", [])
+        subdomains = recon_data.get("subdomains", [])
+        tech_stack = recon_data.get("analysis", {}).get("tech_stack", [])
+        js_endpoints = recon_data.get("analysis", {}).get("js_endpoints", [])
+
+        await self._emit_progress("advanced_hunt", "running", 0.40, {
+            "message": f"Running {len(self.skills) - 7} advanced attack modules..."
+        })
+
+        # Build context for all skills
+        ctx = {
+            "target": target,
+            "urls": all_urls,
+            "live_hosts": live_hosts,
+            "subdomains": subdomains,
+            "tech_stack": tech_stack,
+            "js_endpoints": js_endpoints,
+            "mode": mode,
+        }
+
+        # Run all advanced skills in parallel
+        advanced_skills = [
+            ("race_condition", ctx),
+            ("credential_harvest", {**ctx, "urls": all_urls[:10]}),
+            ("oauth", {**ctx, "urls": [u for u in all_urls if "auth" in u.lower() or "login" in u.lower() or "oauth" in u.lower()][:5]}),
+            ("mass_assignment", {**ctx, "urls": [u for u in all_urls if any(p in u.lower() for p in ["api", "user", "account", "profile", "settings"])]}),
+            ("jwt", {**ctx, "urls": [u for u in all_urls if any(p in u.lower() for p in ["api", "auth", "token", "jwt"])]}),
+            ("cloud_metadata", {**ctx, "urls": all_urls[:5]}),
+            ("subdomain_takeover", {**ctx, "subdomains": subdomains}),
+            ("api_discovery", {**ctx, "urls": all_urls[:10]}),
+        ]
+
+        tasks = []
+        for skill_name, skill_ctx in advanced_skills:
+            if skill_name in self.skills:
+                tasks.append(self._run_advanced_skill(skill_name, skill_ctx))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        advanced_findings = []
+        for result in results:
+            if isinstance(result, Exception):
+                continue
+            if isinstance(result, list):
+                advanced_findings.extend(result)
+
+        # WAF fingerprinting — run on all live hosts
+        try:
+            from skills.shared_waf import SharedWAFBypass
+            waf = SharedWAFBypass()
+            for host_info in live_hosts[:5]:
+                url = host_info.get("url", "") if isinstance(host_info, dict) else str(host_info)
+                if url:
+                    try:
+                        waf_result = await asyncio.wait_for(
+                            waf.detect_waf(url), timeout=10
+                        )
+                        if waf_result and waf_result.get("waf_detected"):
+                            advanced_findings.append({
+                                "type": "waf_detected",
+                                "url": url,
+                                "severity": "info",
+                                "confidence": 0.9,
+                                "waf_name": waf_result.get("waf_name", "unknown"),
+                                "description": f"WAF detected: {waf_result.get('waf_name', 'unknown')}",
+                                "source_tool": "shared-waf",
+                            })
+                    except asyncio.TimeoutError:
+                        pass
+        except Exception:
+            pass
+
+        await self._emit_progress("advanced_hunt", "completed", 0.50, {
+            "findings": len(advanced_findings),
+        })
+
+        return advanced_findings
+
+    async def _run_advanced_skill(self, skill_name: str, ctx: dict) -> list:
+        """Run a single advanced skill and return findings."""
+        try:
+            skill = self.skills.get(skill_name)
+            if not skill:
+                return []
+            result = await asyncio.wait_for(skill.execute(ctx), timeout=30)
+            return result.findings if hasattr(result, "findings") else []
+        except asyncio.TimeoutError:
+            return []
+        except Exception:
+            return []
 
     async def _run_deeper_tests(
         self,
@@ -830,6 +934,11 @@ class PentestPipeline:
             # Phase 2: Hunt (parallel agents)
             findings = await self._phase_hunt(target, mode, recon_data, knowledge_data)
             results["findings"].extend(findings)
+
+            # Phase 2.5: Advanced attack skills (JWT, OAuth, mass assignment, etc.)
+            if not self.config.get("mock_mode", False):
+                advanced_findings = await self._phase_advanced_hunt(target, mode, recon_data)
+                results["findings"].extend(advanced_findings)
 
         # ═══════════════════════════════════════════════════════════
         # COMMON: Quality Gate, Validation, Chain, Report (for both engines)
