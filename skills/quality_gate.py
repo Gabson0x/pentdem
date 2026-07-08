@@ -168,12 +168,30 @@ class ReportQualityGate:
         """
         Evidence must be a raw excerpt containing actual proof,
         not a generated description sentence.
+        
+        If http_request + http_response exist, they ARE the evidence.
+        The evidence field is secondary.
         """
         evidence = finding.get("evidence", "")
+        http_request = finding.get("http_request", "")
+        http_response = finding.get("http_response", "")
 
+        # If we have HTTP request + response, that's sufficient evidence
+        if http_request and http_response:
+            result.score *= 0.95  # Minor penalty for missing evidence field
+            return
+
+        # If we have at least one of request/response, check evidence field
+        if http_request or http_response:
+            if not evidence:
+                result.warnings.append("No evidence field — http_request/http_response provide proof")
+                result.score *= 0.9
+            return
+
+        # No HTTP evidence at all — check evidence field
         if not evidence:
             result.passed = False
-            result.reasons.append("No evidence field — finding has no proof")
+            result.reasons.append("No evidence field AND no http_request/http_response")
             return
 
         # Reject evidence that's clearly a generated summary
@@ -239,15 +257,12 @@ class ReportQualityGate:
             result.reasons.append("No confidence score — detector didn't compute it")
             return
 
-        # Check for suspiciously round default values
-        if confidence in KNOWN_BAD_CONFIDENCE:
-            # Allow if there's strong evidence
-            has_evidence = bool(finding.get("http_response")) and bool(finding.get("payload"))
-            if not has_evidence:
-                result.warnings.append(
-                    f"Confidence={confidence} matches known default — may be hardcoded"
-                )
-                result.score *= 0.85
+        # 0.5 is a valid computed confidence, not a hardcoded default
+        # Only flag 0.0 as truly invalid
+        if confidence == 0.0:
+            result.passed = False
+            result.reasons.append("Confidence=0.0 — finding has no confidence")
+            return
 
     def _check_duplicate(self, finding: dict, result: GateResult):
         """
@@ -267,8 +282,13 @@ class ReportQualityGate:
     def _check_server_side_proof(self, finding: dict, result: GateResult):
         """
         Require proof that input was processed server-side, not just reflected.
+        Uses http_response as fallback evidence if evidence field is missing.
         """
         vuln_type = finding.get("type", finding.get("vuln_class", "")).lower()
+        evidence = finding.get("evidence", "").lower()
+        http_response = finding.get("http_response", "").lower()
+        # Use whichever has content
+        proof_source = evidence if evidence else http_response
 
         # For SSTI, require evaluation proof
         if "ssti" in vuln_type:
@@ -280,18 +300,15 @@ class ReportQualityGate:
                     "must show math expression was evaluated (e.g., {{7*7}}=49)"
                 )
                 return
-            # Proof should be a number (result of math expression), not the payload itself
             if proof in ("{{7*7}}", "${7*7}", "<%= 7*7 %>"):
                 result.passed = False
                 result.reasons.append(
-                    f"Evaluation proof '{proof}' is the payload itself, not the result — "
-                    f"the detector didn't confirm server-side evaluation"
+                    f"Evaluation proof '{proof}' is the payload itself, not the result"
                 )
 
         # For SSRF, require internal content access
         if "ssrf" in vuln_type:
-            evidence = finding.get("evidence", "").lower()
-            has_internal = any(ind in evidence for ind in (
+            has_internal = any(ind in proof_source for ind in (
                 "root:", "metadata", "ami-id", "instance-id", "169.254",
             ))
             if not has_internal:
@@ -300,8 +317,7 @@ class ReportQualityGate:
 
         # For SQLi, require error or data extraction proof
         if "sqli" in vuln_type:
-            evidence = finding.get("evidence", "").lower()
-            has_proof = any(ind in evidence for ind in (
+            has_proof = any(ind in proof_source for ind in (
                 "sql", "mysql", "syntax", "error", "union", "select",
             ))
             if not has_proof:

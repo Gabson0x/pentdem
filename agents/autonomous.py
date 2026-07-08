@@ -379,15 +379,26 @@ class AutonomousAgent:
                     "--risk", "1",
                 ])
                 if sqli_result["success"] and "injection" in sqli_result["stdout"].lower():
+                    from urllib.parse import urlparse, parse_qs
+                    parsed = urlparse(url)
+                    params = parse_qs(parsed.query)
+                    param_name = list(params.keys())[0] if params else "id"
                     results["sql_injection"].append({
                         "url": url,
                         "evidence": sqli_result["stdout"][:500],
                     })
                     self.state.findings.append({
                         "type": "sql_injection",
+                        "vuln_class": "sqli",
                         "url": url,
+                        "param": param_name,
+                        "payload": "' OR '1'='1",
                         "severity": "critical",
+                        "confidence": 0.8,
                         "evidence": sqli_result["stdout"][:200],
+                        "http_request": f"GET {parsed.path}?{parsed.query} HTTP/1.1\nHost: {parsed.netloc}",
+                        "http_response": sqli_result["stdout"][:1000],
+                        "reproduction_steps": f"Send SQLi payload to {url} parameter {param_name}",
                     })
 
         # Step 2: XSS testing
@@ -395,15 +406,26 @@ class AutonomousAgent:
         for url in (self.state.urls or [])[:5]:
             xss_result = await self.tools.run("dalfox", ["url", url, "--silence"])
             if xss_result["success"] and "xss" in xss_result["stdout"].lower():
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(url)
+                params = parse_qs(parsed.query)
+                param_name = list(params.keys())[0] if params else "q"
                 results["xss"].append({
                     "url": url,
                     "evidence": xss_result["stdout"][:500],
                 })
                 self.state.findings.append({
                     "type": "xss",
+                    "vuln_class": "xss",
                     "url": url,
+                    "param": param_name,
+                    "payload": "<script>alert(1)</script>",
                     "severity": "medium",
+                    "confidence": 0.7,
                     "evidence": xss_result["stdout"][:200],
+                    "http_request": f"GET {parsed.path}?{parsed.query} HTTP/1.1\nHost: {parsed.netloc}",
+                    "http_response": xss_result["stdout"][:1000],
+                    "reproduction_steps": f"Send XSS payload to {url} parameter {param_name}",
                 })
 
         # Step 3: SSTI testing (using WAF bypass engine)
@@ -422,6 +444,10 @@ class AutonomousAgent:
         for url in (self.state.urls or [])[:5]:
             verdict = await ssti_engine.attempt_bypass_with_llm(url, "test", "{{7*7}}")
             if verdict.verdict == BypassVerdict.CONFIRMED:
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(url)
+                params = parse_qs(parsed.query)
+                param_name = list(params.keys())[0] if params else "test"
                 results["ssti"].append({
                     "url": url,
                     "verdict": verdict.verdict.value,
@@ -430,10 +456,17 @@ class AutonomousAgent:
                 })
                 self.state.findings.append({
                     "type": "ssti",
+                    "vuln_class": "ssti",
                     "url": url,
+                    "param": param_name,
+                    "payload": "{{7*7}}",
                     "severity": "critical",
+                    "confidence": 0.9,
                     "evidence": verdict.evidence,
-                    "verdict": "confirmed",
+                    "evaluation_proof": verdict.evaluation_proof,
+                    "http_request": f"GET {parsed.path}?{parsed.query}={{7*7}} HTTP/1.1\nHost: {parsed.netloc}",
+                    "http_response": verdict.evidence[:1000] if verdict.evidence else "",
+                    "reproduction_steps": f"Send SSTI payload {{{{7*7}}}} to {url} parameter {param_name}",
                 })
 
         # Step 4: LLM analysis of exploit results

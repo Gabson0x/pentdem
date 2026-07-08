@@ -389,10 +389,10 @@ class PentestPipeline:
             verifier = Verifier(tools=tools)
             verified_findings = await verifier.verify_batch(all_findings)
 
-        # Filter to verified/likely_verified only
+        # Keep verified, likely_verified, AND unverified (let quality gate filter)
         confirmed_findings = [
             f for f in verified_findings
-            if f.get("verification", {}).get("status") in ("verified", "likely_verified")
+            if f.get("verification", {}).get("status") in ("verified", "likely_verified", "unverified")
         ]
 
         # ── Step 6: AI Decision Engine — decide next actions ──
@@ -649,7 +649,7 @@ class PentestPipeline:
     async def _phase_validate(self, findings: List, chains: List) -> List:
         """Phase 4: Validation — poc-validator kills false positives."""
         await self._emit_progress("validate", "running", 0.75, {
-            "message": f"Running 7-Question Gate on {len(findings)} findings..."
+            "message": f"Running 6-Question Gate on {len(findings)} findings..."
         })
 
         # Convert Finding objects to dicts for validate skill

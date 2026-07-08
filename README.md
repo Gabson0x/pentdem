@@ -47,34 +47,43 @@ cp .env.example .env
 # Run mock mode (no API calls)
 python cli.py example.com full hackerone --mock
 
-# Run with autonomous agent (default)
+# ★ RECOMMENDED: Full scan with pipeline engine + Docker isolation
+python cli.py example.com full hackerone --engine pipeline --docker
+
+# Run with autonomous agent (simpler, less coverage)
 python cli.py example.com full hackerone
 
-# Run with Docker isolation (sandboxed tools)
-python cli.py example.com full hackerone --docker
-
-# Run with legacy pipeline
-python cli.py example.com full hackerone --engine pipeline
-
-# Run with both engines
+# Run with both engines (slowest, most thorough)
 python cli.py example.com full hackerone --engine hybrid
-
-# Standalone agent
-python -m agents.autonomous example.com --mock
 ```
+
+### ★ Recommended Command
+
+```bash
+python cli.py <target> full <platform> --engine pipeline --docker
+```
+
+**Why pipeline + docker is better than agent mode:**
+- **15 vuln classes** run in parallel (agent runs 4 sequentially)
+- **8 advanced attack skills** run in parallel (JWT, OAuth, mass assignment, race condition, cloud metadata, subdomain takeover, credential harvesting, API discovery)
+- **WAF fingerprinting** runs on all live hosts automatically
+- **Docker isolation** sandboxes dangerous tools (sqlmap, nuclei, nmap)
+- **Quality gate** rejects weak findings before report
+- **Kill-chain builder** chains findings into attack paths
+- **Faster** — parallel execution vs sequential agent phases
 
 ## Pipeline Flow
 
-### Agent Engine (default)
-```
-recon → scan → fuzz → exploit → chain → quality_gate → validate → report
-```
-
-### Pipeline Engine
+### ★ Pipeline Engine (recommended)
 ```
 recon → learn → hunt (15 vuln classes parallel)
   → advanced_hunt (8 attack skills parallel + WAF fingerprinting)
   → quality_gate → chain → validate → screenshot → report → memory
+```
+
+### Agent Engine (simpler)
+```
+recon → scan → fuzz → exploit → chain → quality_gate → validate → report
 ```
 
 ### Phase Details
@@ -93,6 +102,9 @@ recon → learn → hunt (15 vuln classes parallel)
 ## CLI Usage
 
 ```bash
+# ★ RECOMMENDED: Full scan with all attack classes + Docker isolation
+python cli.py <target> full <platform> --engine pipeline --docker
+
 # Full scan (24 vuln classes, ~2min mock)
 python cli.py <target> full <platform> [--mock] [--docker]
 
@@ -103,9 +115,9 @@ python cli.py <target> quick [--mock] [--docker]
 python cli.py <target> targeted [--mock] [--docker]
 
 # Engine selection
-python cli.py <target> full hackerone --engine agent      # Autonomous agent (default)
-python cli.py <target> full hackerone --engine pipeline   # Legacy pipeline
-python cli.py <target> full hackerone --engine hybrid     # Both engines
+python cli.py <target> full hackerone --engine agent      # Autonomous agent (simpler)
+python cli.py <target> full hackerone --engine pipeline   # ★ Pipeline (recommended)
+python cli.py <target> full hackerone --engine hybrid     # Both engines (slowest)
 
 # Docker isolation (sandboxed tool execution)
 python cli.py <target> full hackerone --docker
@@ -126,9 +138,11 @@ python cli.py knowledge search <q>
 
 | Engine | How it works | Best for |
 |--------|--------------|----------|
-| **agent** | Uses 34 tools + LLM analyzes after each phase | Full automation, real tool execution |
-| **pipeline** | Uses skills with parallel vuln class testing + advanced hunt | Deep analysis, maximum coverage |
-| **hybrid** | Runs agent for tools, pipeline for analysis | Double validation |
+| **pipeline** ★ | 15 vuln classes parallel + 8 advanced skills + WAF + Docker | **Recommended** — maximum coverage, faster |
+| **agent** | Uses 34 tools + LLM analyzes after each phase | Simpler, less coverage |
+| **hybrid** | Runs agent for tools, pipeline for analysis | Double validation (slowest) |
+
+★ **Pipeline engine is recommended** — it runs more attack classes in parallel, includes advanced hunt phase, and supports Docker isolation.
 
 ## Attack Classes (24)
 
