@@ -19,6 +19,8 @@ from rate_limiter import RateLimiter
 from tools import ToolExecutor
 from skills.bypass import BypassEngine
 from skills.waf_bypass import BypassResult
+from skills.shared_waf import SharedWAFBypass
+from skills.attack_strategy import LLMAttackStrategy
 
 
 # ─── URL Scorer (Deterministic, No LLM) ──────────────────────────
@@ -157,6 +159,8 @@ class ConcurrentHuntRunner:
         self.mock = mock
         self.limiter = rate_limiter or RateLimiter(max_per_sec=15, burst=30)
         self.bypass = BypassEngine()
+        self.shared_waf = SharedWAFBypass()
+        self.attack_strategy = LLMAttackStrategy()
         self._semaphore = asyncio.Semaphore(20)
 
     async def run_all_classes(
@@ -193,6 +197,39 @@ class ConcurrentHuntRunner:
             if isinstance(result, Exception):
                 continue
             all_findings.extend(result)
+
+        # Use attack strategy to re-prioritize if we have findings
+        if all_findings:
+            try:
+                # Build signal snapshots from findings
+                from skills.attack_strategy import SignalSnapshot
+                signals = []
+                for f in all_findings[:5]:
+                    signals.append(SignalSnapshot(
+                        url=f.get("url", ""),
+                        status=200 if f.get("http_response") else 0,
+                        response_time_ms=0,
+                        body_size=len(f.get("http_response", "")),
+                        headers={},
+                        body_snippet=f.get("http_response", "")[:200] if f.get("http_response") else "",
+                        error_patterns=[f.get("type", "")],
+                    ))
+                
+                available_classes = list(set(f.get("type", "").split("_")[0] for f in all_findings))
+                plan = self.attack_strategy.generate_attack_plan(signals, available_classes)
+                
+                # If strategy recommends prioritization, log it
+                if plan.priority_classes:
+                    all_findings.append({
+                        "type": "attack_strategy_recommendation",
+                        "url": target,
+                        "severity": "info",
+                        "confidence": plan.confidence,
+                        "description": f"Strategy prioritizes: {', '.join(plan.priority_classes)}",
+                        "source_tool": "attack-strategy",
+                    })
+            except Exception:
+                pass  # Non-critical
 
         # Deduplicate
         deduped = self._deduplicate(all_findings)

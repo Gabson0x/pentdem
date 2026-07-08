@@ -137,7 +137,7 @@ python cli.py knowledge search <q>
 |------|---------|-------------|----------|
 | `quick` | 6 | ~7s | Fast recon, top vulns |
 | `targeted` | 4 | ~10s | Core vulns only |
-| `full` | 15 | ~7s | Complete audit |
+| `full` | 15 | ~1m | Complete audit |
 
 ## API Usage
 

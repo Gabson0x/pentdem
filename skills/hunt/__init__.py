@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import time
 from typing import Dict, Any, List, Tuple
 from urllib.parse import urlparse, parse_qs, urlencode
 from skills.base import BaseSkill, SkillResult
@@ -8,6 +9,7 @@ from skills.bypass import BypassEngine
 from skills.temp_email import TempEmail, EmailIDORTester
 from skills.deep_exploration import DeepExplorer
 from skills.session_bypass import SessionAuthBypass
+from skills.evidence_collector import EvidenceCollector
 from tools import ToolExecutor
 
 
@@ -30,6 +32,7 @@ class HuntSkill(BaseSkill):
         self.bypass = BypassEngine()
         self.explorer = DeepExplorer(tools=self.tools, scope_guard=scope_guard)
         self.session_bypass = SessionAuthBypass(tools=self.tools, scope_guard=scope_guard)
+        self.evidence_collector = EvidenceCollector()
         self._waf_cache = {}
 
     def can_handle(self, task_type: str) -> bool:
@@ -1264,26 +1267,53 @@ class HuntSkill(BaseSkill):
             params = parse_qs(parsed.query)
 
             for param_name in params:
+                # Get baseline response first
+                baseline_resp = await self._make_request(url)
+                baseline = self._parse_response(baseline_resp["raw"])
+                baseline_data = {
+                    "status": baseline["status"],
+                    "body": baseline["body"],
+                    "headers": baseline["headers"],
+                }
+
                 for payload in self.tools.payloads.XSS[:4]:
                     new_params = dict(params)
                     new_params[param_name] = [payload]
                     test_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{urlencode(new_params, doseq=True)}"
                     resp = await self._make_request(test_url)
                     pr = self._parse_response(resp["raw"])
+                    
+                    exploit_data = {
+                        "status": pr["status"],
+                        "body": pr["body"],
+                        "headers": pr["headers"],
+                    }
 
                     if payload in pr["body"] and pr["headers"].get("content-type", "").startswith("text/html"):
-                        findings.append({
+                        finding = {
                             "type": "XSS",
                             "url": test_url,
                             "param": param_name,
                             "payload": payload,
                             "severity": "high",
-                            "evidence": f"Payload reflected. Snippet: {pr['body'][:300]}",
                             "description": f"Reflected XSS in {param_name}",
                             "confidence": 0.8,
                             "cvss_score": 6.1,
                             "source_tool": "hunt",
-                        })
+                        }
+                        
+                        # Enrich with evidence collector
+                        finding = self.evidence_collector.enrich_finding(
+                            finding=finding,
+                            url=test_url,
+                            param=param_name,
+                            payload=payload,
+                            baseline_response=baseline_data,
+                            exploit_response=exploit_data,
+                            evidence_context=f"Payload reflected in HTML response",
+                            server_side_proof="Payload reflects in HTML without encoding",
+                        )
+                        findings.append(finding)
                         break
 
         return findings, test_names
@@ -1297,9 +1327,14 @@ class HuntSkill(BaseSkill):
             params = parse_qs(parsed.query)
 
             for param_name in params:
+                # Get baseline response first
                 baseline_resp = await self._make_request(url)
                 baseline = self._parse_response(baseline_resp["raw"])
-                baseline_len = len(baseline["body"])
+                baseline_data = {
+                    "status": baseline["status"],
+                    "body": baseline["body"],
+                    "headers": baseline["headers"],
+                }
 
                 for payload in self.tools.payloads.SQLI[:5]:
                     new_params = dict(params)
@@ -1307,37 +1342,72 @@ class HuntSkill(BaseSkill):
                     test_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{urlencode(new_params, doseq=True)}"
                     resp = await self._make_request(test_url)
                     pr = self._parse_response(resp["raw"])
+                    
+                    exploit_data = {
+                        "status": pr["status"],
+                        "body": pr["body"],
+                        "headers": pr["headers"],
+                    }
 
-                    if baseline["status"] == pr["status"] and abs(len(pr["body"]) - baseline_len) > 200:
-                        analysis = await self._analyze_sqli_finding(test_url, param_name, payload, pr)
-                        if analysis.get("is_vulnerable"):
-                            findings.append({
-                                "type": "SQLi",
-                                "url": test_url,
-                                "param": param_name,
-                                "payload": payload,
-                                "severity": "critical",
-                                "evidence": f"Baseline: {baseline_len}B, Test: {len(pr['body'])}B. {pr['body'][:300]}",
-                                "description": analysis.get("description", f"SQLi in {param_name}"),
-                                "confidence": analysis.get("confidence", 0.6),
-                                "cvss_score": 9.8,
-                                "source_tool": "hunt",
-                            })
-                            break
-
-                    if any(err in pr["body"].lower() for err in ("sql", "mysql", "syntax", "unclosed", "quotation", "odbc")):
-                        findings.append({
+                    # Check for SQL errors
+                    sql_errors = ("sql", "mysql", "syntax", "unclosed", "quotation", "odbc",
+                                  "postgresql", "ORA-", "SQLite", "MariaDB")
+                    has_error = any(err in pr["body"].lower() for err in sql_errors)
+                    
+                    if has_error:
+                        finding = {
                             "type": "SQLi",
                             "url": test_url,
                             "param": param_name,
                             "payload": payload,
                             "severity": "critical",
-                            "evidence": f"SQL error: {pr['body'][:500]}",
                             "description": f"SQLi in {param_name} — error leaked",
                             "confidence": 0.9,
                             "cvss_score": 9.8,
                             "source_tool": "hunt",
-                        })
+                        }
+                        
+                        # Enrich with evidence collector
+                        finding = self.evidence_collector.enrich_finding(
+                            finding=finding,
+                            url=test_url,
+                            param=param_name,
+                            payload=payload,
+                            baseline_response=baseline_data,
+                            exploit_response=exploit_data,
+                            evidence_context=pr["body"][:500],
+                            server_side_proof="SQL error message indicates server-side query processing",
+                        )
+                        findings.append(finding)
+                        break
+                    
+                    # Check for significant response size change (blind SQLi)
+                    baseline_len = len(baseline["body"])
+                    if abs(len(pr["body"]) - baseline_len) > 200 and baseline["status"] == pr["status"]:
+                        finding = {
+                            "type": "SQLi (Blind)",
+                            "url": test_url,
+                            "param": param_name,
+                            "payload": payload,
+                            "severity": "critical",
+                            "description": f"Potential blind SQLi in {param_name} — response size changed",
+                            "confidence": 0.6,
+                            "cvss_score": 9.8,
+                            "source_tool": "hunt",
+                        }
+                        
+                        # Enrich with evidence collector
+                        finding = self.evidence_collector.enrich_finding(
+                            finding=finding,
+                            url=test_url,
+                            param=param_name,
+                            payload=payload,
+                            baseline_response=baseline_data,
+                            exploit_response=exploit_data,
+                            evidence_context=f"Baseline: {baseline_len}B, Test: {len(pr['body'])}B",
+                            server_side_proof="Response size difference indicates server-side query processing",
+                        )
+                        findings.append(finding)
                         break
 
         return findings, test_names

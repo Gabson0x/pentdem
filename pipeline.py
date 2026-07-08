@@ -6,6 +6,14 @@ Inspired by the Bug-Bounty-Agents swarm-orchestrator pattern.
 
 v4.0: Merged AutonomousAgent as primary execution engine.
      Reports stored in per-target folders (reports/{domain}/).
+v5.0: Added AIDecisionEngine for autonomous decision-making.
+     - When to go deeper on findings
+     - When to switch targets
+     - How to control testing depth
+v6.0: Added ReportQualityGate — single chokepoint for all findings.
+     - Every finding must pass evidence consistency checks
+     - Prevents fabricated findings from reaching reports
+     - Auto-fixes CVSS/severity mismatches
 """
 
 import asyncio
@@ -34,6 +42,18 @@ from skills.knowledge import KnowledgeSkill
 from skills.validate import ValidateSkill
 from skills.report import ReportSkill
 from skills.memory import MemorySkill
+from skills.quality_gate import ReportQualityGate
+from skills.subdomain_takeover import SubdomainTakeoverSkill
+from skills.jwt_attack import JWTAttackSkill
+from skills.api_discovery import APIDiscoverySkill
+from skills.mass_assignment import MassAssignmentSkill
+from skills.cloud_metadata import CloudMetadataSkill
+from skills.race_condition import RaceConditionSkill
+from skills.credential_harvesting import CredentialHarvestingSkill
+from skills.oauth_attack import OAuthAttackSkill
+from skills.multi_stage_chain import MultiStageChainSkill
+from skills.shared_waf import SharedWAFBypass
+from skills.attack_strategy import LLMAttackStrategy
 from adaptive_engine import AdaptiveEngine
 from verifier import Verifier
 from concurrent_hunt import ConcurrentHuntRunner
@@ -41,6 +61,7 @@ from rate_limiter import RateLimiter
 from models import ModelClient
 from agents.autonomous import AutonomousAgent
 from tools import ToolExecutor
+from ai_decision_engine import AIDecisionEngine, Decision, DecisionType
 
 
 class PentestPipeline:
@@ -102,6 +123,12 @@ class PentestPipeline:
         except Exception:
             self.model_client = None
         self.agent = AutonomousAgent(mock=mock, model_client=self.model_client)
+        
+        # AI Decision Engine for autonomous decision-making
+        self.decision_engine = AIDecisionEngine(model_client=self.model_client)
+        
+        # Report Quality Gate — single chokepoint for all findings
+        self.quality_gate = ReportQualityGate()
 
         self.skills = {
             "learn": KnowledgeSkill(mock=mock),
@@ -126,6 +153,7 @@ class PentestPipeline:
         self.state = EngagementState(mock=mock)
         self._progress_callbacks = []
         self._agent_statuses: Dict[str, AgentStatus] = {}
+        self._hunt_start_time = 0
 
     def on_progress(self, callback):
         self._progress_callbacks.append(callback)
@@ -277,15 +305,18 @@ class PentestPipeline:
         knowledge_data: dict,
     ) -> List[Finding]:
         """
-        Phase 2: Concurrent vulnerability hunting.
+        Phase 2: AI-driven vulnerability hunting.
 
         Architecture:
+        - AIDecisionEngine guides which vuln classes to test and when to go deeper
         - 15 vuln classes run in parallel via asyncio.gather
         - Shared RateLimiter (token bucket) caps total requests/sec
         - URL scoring per class (no LLM) selects top 5 URLs
         - Fast-fail 4s timeout with single retry
         - Verification loops confirm findings before counting
+        - AI decides when to switch strategies or targets
         """
+        self._hunt_start_time = time.time()
         all_urls = recon_data.get("urls", [])
         tech_stack = recon_data.get("analysis", {}).get("tech_stack", [])
         tech_key = tech_stack[0] if tech_stack else "generic"
@@ -346,7 +377,40 @@ class PentestPipeline:
             if f.get("verification", {}).get("status") in ("verified", "likely_verified")
         ]
 
-        # ── Step 6: Record strategy success for cross-run learning ──
+        # ── Step 6: AI Decision Engine — decide next actions ──
+        if not self.config.get("mock_mode", False) and self.model_client:
+            time_spent = time.time() - self._hunt_start_time
+            
+            # Get AI decision on what to do next
+            decision = await self.decision_engine.decide_next_action(
+                target=target,
+                current_findings=confirmed_findings,
+                phase="hunt",
+                time_spent=time_spent,
+                available_vuln_classes=vuln_types,
+            )
+            
+            await self._emit_progress("hunt", "running", 0.50, {
+                "message": f"AI Decision: {decision.action.value} — {decision.reasoning}",
+                "decision": {
+                    "action": decision.action.value,
+                    "confidence": decision.confidence,
+                    "depth_level": decision.depth_level,
+                },
+            })
+            
+            # Execute AI decision if it's to go deeper
+            if decision.action == DecisionType.DEEPER:
+                # Run deeper tests on promising findings
+                deeper_findings = await self._run_deeper_tests(
+                    target, confirmed_findings, decision
+                )
+                confirmed_findings.extend(deeper_findings)
+            
+            # Record decision for learning
+            self.decision_engine.decision_history.append(decision)
+
+        # ── Step 7: Record strategy success for cross-run learning ──
         for f in confirmed_findings:
             vt = f.get("type", f.get("vuln_class", ""))
             confidence = f.get("confidence", 0.5)
@@ -359,13 +423,68 @@ class PentestPipeline:
         await self._emit_progress("hunt", "completed", 0.55, {"findings": len(confirmed_findings)})
         return confirmed_findings
 
+    async def _run_deeper_tests(
+        self,
+        target: str,
+        findings: List[Dict],
+        decision: Decision,
+    ) -> List[Dict]:
+        """
+        Run deeper tests on promising findings based on AI decision.
+        
+        This method:
+        1. Analyzes each finding for depth potential
+        2. Generates specific test plans
+        3. Executes additional tests
+        4. Collects more evidence
+        """
+        deeper_findings = []
+        
+        for finding in findings:
+            # Analyze if we should go deeper on this finding
+            finding_decision = await self.decision_engine.analyze_finding_for_depth(
+                finding=finding,
+                target=target,
+            )
+            
+            if finding_decision.action in (DecisionType.VERIFY, DecisionType.EXPLOIT):
+                # Generate depth plan
+                depth_plan = await self.decision_engine.generate_depth_plan(
+                    finding=finding,
+                    target=target,
+                )
+                
+                # Run additional tests based on plan
+                additional_findings = await self._execute_depth_plan(
+                    finding=finding,
+                    plan=depth_plan,
+                    target=target,
+                )
+                
+                deeper_findings.extend(additional_findings)
+        
+        return deeper_findings
+
+    async def _execute_depth_plan(
+        self,
+        finding: Dict,
+        plan: Dict,
+        target: str,
+    ) -> List[Dict]:
+        """Execute a depth plan for a specific finding."""
+        findings = []
+        
+        # This would execute the specific tests from the plan
+        # For now, return empty - to be implemented with actual test execution
+        return findings
+
     async def _phase_chain(self, target: str, findings: List) -> List[dict]:
         """Phase 3: Attack chain analysis — exploit-chainer agent."""
         # Only build chains from verified findings
         verified = [
             f for f in findings
             if isinstance(f, dict)
-            and f.get("verification", {}).get("status") in ("verified", "likely_verified", None)
+            and f.get("verification", {}).get("status") in ("verified", "likely_verified")
         ]
 
         await self._emit_progress("chain", "running", 0.60, {
@@ -696,7 +815,7 @@ class PentestPipeline:
             results["findings"].extend(findings)
 
         # ═══════════════════════════════════════════════════════════
-        # COMMON: Validation, Chain, Report (for both engines)
+        # COMMON: Quality Gate, Validation, Chain, Report (for both engines)
         # ═══════════════════════════════════════════════════════════
 
         # Analyze any pre-existing tool outputs
@@ -709,6 +828,27 @@ class PentestPipeline:
                 elif isinstance(tf, dict):
                     results["findings"].append(tf)
             tool_outputs = [{"tool": "external", "findings_count": len(tool_findings)}]
+
+        # ── QUALITY GATE: Single chokepoint for all findings ──
+        # Every finding MUST pass evidence consistency checks before reaching reports
+        self.quality_gate.reset_dedup()
+        passed_findings, rejected_findings = self.quality_gate.check_batch(results["findings"])
+        
+        if rejected_findings:
+            await self._emit_progress("quality_gate", "running", 0.58, {
+                "passed": len(passed_findings),
+                "rejected": len(rejected_findings),
+                "reasons": [r["reasons"][0] for r in rejected_findings[:5]],
+            })
+        
+        # Store rejected findings for diagnostics
+        results["rejected_findings"] = rejected_findings
+        results["findings"] = passed_findings
+        
+        gate_stats = self.quality_gate.get_stats()
+        await self._emit_progress("quality_gate", "completed", 0.59, {
+            "stats": gate_stats,
+        })
 
         # Phase 3: Chain analysis
         chains = await self._phase_chain(target, results["findings"])

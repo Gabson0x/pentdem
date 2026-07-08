@@ -164,7 +164,24 @@ class ValidateSkill(BaseSkill):
         return finding
 
     async def _seven_question_gate(self, finding: dict) -> dict:
-        prompt = f"""Validate this security finding using the 7-Question Gate:
+        """
+        Enhanced 7-Question Gate with evidence requirements.
+        
+        Pre-checks evidence quality before LLM validation.
+        Rejects findings without sufficient evidence.
+        """
+        # Pre-check: Evidence quality gate
+        evidence_check = self._check_evidence_quality(finding)
+        if not evidence_check["pass"]:
+            return {
+                "pass": False,
+                "answers": {},
+                "reason": f"Evidence gate failed: {evidence_check['reason']}",
+                "exploitability_notes": "Insufficient evidence for validation",
+                "evidence_score": evidence_check["score"],
+            }
+        
+        prompt = f"""Validate this security finding using the 7-Question Gate.
 
 Finding: {json.dumps(finding, indent=2)}
 
@@ -176,19 +193,111 @@ Finding: {json.dumps(finding, indent=2)}
 6. Can you reproduce this with a clear PoC? (yes/no)
 7. Is this unique (not a duplicate of another finding)? (yes/no)
 
+IMPORTANT EVIDENCE REQUIREMENTS:
+- Finding MUST include: payload_used, injection_point, http_request, http_response, reproduction_steps
+- Finding MUST include baseline comparison (before/after)
+- Finding MUST include server-side proof (not just reflection)
+- If evidence is missing, answer "no" to questions 2, 6, and 7
+
 Return JSON:
 {{
     "pass": true/false,
     "answers": {{"q1": "yes/no", ...}},
     "reason": "explanation if failed, or 'All checks passed'",
-    "exploitability_notes": "how to exploit"
+    "exploitability_notes": "how to exploit",
+    "evidence_score": 0.0-1.0
 }}"""
 
         response = await self.llm_analyze(prompt)
         try:
-            return json.loads(response)
+            result = json.loads(response)
+            # Ensure evidence_score is included
+            if "evidence_score" not in result:
+                result["evidence_score"] = evidence_check["score"]
+            return result
         except (json.JSONDecodeError, ValueError):
-            return {"pass": True, "answers": {}, "reason": "Gate check skipped"}
+            return {
+                "pass": False,
+                "answers": {},
+                "reason": "Gate check failed — invalid LLM response",
+                "exploitability_notes": "",
+                "evidence_score": evidence_check["score"],
+            }
+
+    def _check_evidence_quality(self, finding: dict) -> dict:
+        """
+        Pre-check evidence quality before LLM validation.
+        
+        Returns:
+            {
+                "pass": bool,
+                "score": float (0-1),
+                "reason": str,
+                "missing": list
+            }
+        """
+        required_fields = [
+            "payload_used",
+            "injection_point",
+            "http_request",
+            "http_response",
+            "reproduction_steps",
+        ]
+        
+        # Check for required fields
+        missing = [f for f in required_fields if not finding.get(f)]
+        
+        # Check for additional evidence
+        has_baseline = bool(finding.get("baseline_comparison", {}).get("available"))
+        has_server_proof = bool(finding.get("server_side_proof"))
+        has_evidence_context = bool(finding.get("evidence_context"))
+        
+        # Calculate score
+        score = 0.0
+        max_score = len(required_fields) + 2  # +2 for baseline and server proof
+        
+        for field in required_fields:
+            if finding.get(field):
+                score += 1
+        
+        if has_baseline:
+            score += 1
+        if has_server_proof:
+            score += 1
+        
+        score = min(1.0, score / max_score)
+        
+        # Determine pass/fail
+        if len(missing) > 2:
+            return {
+                "pass": False,
+                "score": score,
+                "reason": f"Missing {len(missing)} required evidence fields: {', '.join(missing)}",
+                "missing": missing,
+            }
+        
+        if not has_baseline:
+            return {
+                "pass": False,
+                "score": score,
+                "reason": "No baseline comparison — cannot confirm change",
+                "missing": missing,
+            }
+        
+        if score < 0.5:
+            return {
+                "pass": False,
+                "score": score,
+                "reason": f"Evidence score too low ({score:.2f} < 0.5)",
+                "missing": missing,
+            }
+        
+        return {
+            "pass": True,
+            "score": score,
+            "reason": "Evidence quality sufficient",
+            "missing": missing,
+        }
 
     def _dedup(self, findings: list) -> list:
         if not findings:
