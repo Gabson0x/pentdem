@@ -15,6 +15,10 @@ import hashlib
 from typing import Dict, List, Any, Tuple
 from urllib.parse import urlparse, parse_qs, urlencode
 
+from skills.reflection_context import (
+    classify_reflection, recommended_probe, EXECUTABLE, NEEDS_BREAKOUT, INERT, NOT_REFLECTED,
+)
+
 
 class Verifier:
     """
@@ -98,52 +102,58 @@ class Verifier:
     async def _verify_xss(self, url: str, param: str, payload: str) -> dict:
         """
         Verify XSS by:
-        1. Sending canary payload with unique marker
-        2. Checking if marker reflects unescaped
-        3. Testing context (HTML, attribute, JS)
+        1. Sending a canary-sandwich probe (nonce<>'"nonce)
+        2. Using the deterministic classifier to read context + surviving metacharacters
+        3. Rejecting inert / not_reflected before they waste a report line
         """
-        canary = f"pentdem_{hashlib.md5(str(time.time()).encode()).hexdigest()[:8]}"
-        canary_payload = f"<pentdem>{canary}</pentdem>"
+        nonce = f"pentdem_{hashlib.md5(str(time.time()).encode()).hexdigest()[:8]}"
+        probe = recommended_probe(nonce)
 
         tests = []
 
-        # Test 1: Canary reflection
-        test_url = self._inject_param(url, param, canary_payload)
+        # Test 1: Inject canary-sandwich probe
+        test_url = self._inject_param(url, param, probe)
         resp = await self._make_request(test_url)
         pr = self._parse_response(resp.get("raw", ""))
 
+        # Deterministic context classification — replaces the old regex-based detection
+        rc = classify_reflection(pr["body"], nonce)
+
         test_result = {
-            "test": "canary_reflection",
-            "payload": canary_payload,
-            "reflected": canary in pr["body"],
-            "escaped": self._is_html_escaped(canary, pr["body"]),
+            "test": "canary_sandwich_probe",
+            "payload": probe,
+            "nonce": nonce,
+            "reflected": rc.reflected,
+            "verdict": rc.verdict,
+            "context": rc.hits[0].context if rc.hits else None,
+            "raw_chars": rc.hits[0].raw_chars if rc.hits else [],
+            "hit_count": rc.count,
             "status_code": pr["status"],
         }
         tests.append(test_result)
 
-        if canary not in pr["body"]:
+        if not rc.reflected:
             return {
                 "status": "false_positive",
-                "reason": "Canary string not reflected in response",
+                "reason": "Canary-sandwich probe not reflected in response",
                 "verification_tests": tests,
             }
 
-        if self._is_html_escaped(canary, pr["body"]):
+        if rc.verdict == NOT_REFLECTED:
             return {
                 "status": "false_positive",
-                "reason": "Canary reflected but HTML-escaped",
+                "reason": "Classifier: not_reflected — nonce absent from response",
                 "verification_tests": tests,
             }
 
-        # Test 2: Context detection
-        context = self._detect_xss_context(canary, pr["body"])
-        test_result_2 = {
-            "test": "context_detection",
-            "context": context,
-        }
-        tests.append(test_result_2)
+        if rc.verdict == INERT:
+            return {
+                "status": "false_positive",
+                "reason": "Classifier: inert — all break-out characters are HTML-escaped",
+                "verification_tests": tests,
+            }
 
-        # Test 3: Verify original payload also works
+        # Test 2: Verify original payload also works (if provided)
         if payload:
             test_url_2 = self._inject_param(url, param, payload)
             resp_2 = await self._make_request(test_url_2)
@@ -156,42 +166,36 @@ class Verifier:
             }
             tests.append(test_result_3)
 
+        context = rc.hits[0].context if rc.hits else "unknown"
+        raw_chars_str = ",".join(rc.hits[0].raw_chars) if rc.hits else "none"
+
         return {
             "status": "verified",
-            "reason": f"XSS confirmed — canary reflects unescaped in {context} context",
+            "reason": f"XSS confirmed — classifier verdict={rc.verdict} context={context} raw_chars=[{raw_chars_str}]",
             "verification_tests": tests,
             "context": context,
+            "verdict": rc.verdict,
+            "raw_chars": rc.hits[0].raw_chars if rc.hits else [],
+            "confidence": rc.as_finding(nonce)["confidence"],
+            "evidence": rc.evidence,
             "poc_steps": [
                 f"1. Navigate to: {url}",
                 f"2. Inject payload in {param}: {payload}",
-                f"3. Observe execution in {context} context",
+                f"3. Observe execution in {context} context (verdict: {rc.verdict})",
             ],
         }
 
     def _detect_xss_context(self, marker: str, body: str) -> str:
-        """Detect where the XSS payload lands in the HTML."""
-        # In an attribute
-        if re.search(rf'<[^>]+{re.escape(marker)}[^>]*>', body):
-            return "html_attribute"
-        # In a script tag
-        if re.search(rf'<script[^>]*>.*{re.escape(marker)}.*</script>', body, re.DOTALL):
-            return "javascript"
-        # In HTML body
-        if re.search(rf'>[^<]*{re.escape(marker)}[^<]*<', body):
-            return "html_body"
-        # In a comment
-        if re.search(rf'<!--.*{re.escape(marker)}.*-->', body):
-            return "html_comment"
-        return "unknown"
+        """Legacy shim — delegates to reflection_context.classify_reflection."""
+        rc = classify_reflection(body, marker)
+        if not rc.reflected:
+            return "not_reflected"
+        return rc.hits[0].context if rc.hits else "unknown"
 
     def _is_html_escaped(self, marker: str, body: str) -> bool:
-        """Check if the marker is HTML-escaped."""
-        escaped_forms = [
-            marker.replace("<", "&lt;").replace(">", "&gt;"),
-            marker.replace("<", "&#60;").replace(">", "&#62;"),
-            marker.replace("<", "&#x3C;").replace(">", "&#x3E;"),
-        ]
-        return any(esc in body for esc in escaped_forms)
+        """Legacy shim — returns True if classifier verdict is INERT (all chars escaped)."""
+        rc = classify_reflection(body, marker)
+        return rc.verdict == INERT and rc.reflected
 
     def _xss_reflected(self, payload: str, body: str) -> bool:
         """Check if XSS payload is reflected (even partially)."""

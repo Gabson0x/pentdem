@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import re
 import sqlite3
 from typing import Dict, Any, List
@@ -13,6 +14,8 @@ from adaptive_wordlist_engine import (
     record_hit,
     write_wordlist,
 )
+
+log = logging.getLogger("recon")
 
 
 class ReconSkill(BaseSkill):
@@ -49,56 +52,57 @@ class ReconSkill(BaseSkill):
 
         data = {}
         findings = []
-        import time, logging
-        log = logging.getLogger("recon")
+        import time
         t_start = time.time()
 
         # Phase 1: Subdomain enumeration + URL crawling in parallel
         log.info(f"[{target}] Phase 1: subdomain enumeration")
         subdomain_task = self._enumerate_subdomains(target)
-        crawl_task = self._crawl_public_sources(target) if mode == "full" else None
+        crawl_task = self._crawl_public_sources(target)
 
         subdomains = await subdomain_task
         data["subdomains"] = subdomains
-        data["subdomains_raw"] = subdomains
         log.info(f"[{target}] Phase 1 complete: {len(subdomains)} subdomains ({time.time()-t_start:.1f}s)")
 
-        if crawl_task:
-            public_urls = await crawl_task
-            data["public_urls"] = public_urls
-        else:
-            public_urls = []
+        public_urls = await crawl_task
+        data["public_urls"] = public_urls
 
-        # Phase 2: Live host detection
+        # Phase 2: Live host detection — include crt.sh subdomains
         t_phase2 = time.time()
         log.info(f"[{target}] Phase 2: live host detection")
-        all_hosts = list(set(subdomains + [target]))
+        public_hosts = [urlparse(u).hostname for u in public_urls if urlparse(u).hostname]
+        all_hosts = list(set(subdomains + public_hosts + [target]))
         live_hosts = await self._detect_live_hosts(all_hosts)
         data["live_hosts"] = live_hosts
 
-        live_urls = [h.get("url", f"https://{h['host']}") for h in live_hosts if h.get("alive")]
+        default_scheme = "http" if self._is_local_target(target) else "https"
+        live_urls = [h.get("url", f"{default_scheme}://{h['host']}") for h in live_hosts if h.get("alive")]
         log.info(f"[{target}] Phase 2 complete: {len(live_urls)} live hosts ({time.time()-t_phase2:.1f}s)")
 
         # Phase 3: Deep crawling + directory fuzzing (parallelized across hosts)
         deep_urls = []
         fuzzed = []
-        if mode == "full" and live_urls:
+        if live_urls:
             t_phase3 = time.time()
-            log.info(f"[{target}] Phase 3: crawling + fuzzing {len(live_urls)} hosts")
-            # Parallelize across hosts: each host gets its own katana + ffuf tasks
-            host_tasks = []
-            for url in live_urls[:5]:  # cap at 5 hosts
-                host_tasks.append(self._crawl_deep_single(url))
-                host_tasks.append(self._fuzz_single_host(url))
-            results = await asyncio.gather(*host_tasks, return_exceptions=True)
-            for r in results:
-                if isinstance(r, Exception):
-                    continue
-                if isinstance(r, dict):
-                    deep_urls.extend(r.get("deep", []))
-                    fuzzed.extend(r.get("fuzz", []))
-                elif isinstance(r, list):
-                    deep_urls.extend(r)
+            if mode == "quick":
+                # Quick mode: lightweight crawl — katana depth 1, primary host only, no ffuf
+                log.info(f"[{target}] Phase 3 (quick): lightweight crawl on {live_urls[:1]}")
+                deep_urls = await self._crawl_deep_quick(live_urls[:1])
+            else:
+                log.info(f"[{target}] Phase 3: crawling + fuzzing {len(live_urls)} hosts")
+                host_tasks = []
+                for url in live_urls[:5]:
+                    host_tasks.append(self._crawl_deep_single(url))
+                    host_tasks.append(self._fuzz_single_host(url))
+                results = await asyncio.gather(*host_tasks, return_exceptions=True)
+                for r in results:
+                    if isinstance(r, Exception):
+                        continue
+                    if isinstance(r, dict):
+                        deep_urls.extend(r.get("deep", []))
+                        fuzzed.extend(r.get("fuzz", []))
+                    elif isinstance(r, list):
+                        deep_urls.extend(r)
             log.info(f"[{target}] Phase 3 complete: {len(deep_urls)} crawled + {len(fuzzed)} fuzzed ({time.time()-t_phase3:.1f}s)")
 
         all_urls = list(set(public_urls + deep_urls + fuzzed))
@@ -120,25 +124,43 @@ class ReconSkill(BaseSkill):
         data["tech_stack"] = tech_stack
 
         wl_conn = self._get_wl_conn()
+        # Normalize paths from all discovered hosts, not just the root target
+        discovered_paths = []
+        for u in all_urls[:50]:
+            parsed = urlparse(u)
+            path = parsed.path.rstrip("/") or "/"
+            if parsed.query:
+                path += f"?{parsed.query}"
+            discovered_paths.append(path)
+
         ctx = ReconContext(
             domain=target,
             tech_stack=tech_stack,
-            discovered_paths=[u.replace(f"https://{target}", "").rstrip("/") or "/" for u in all_urls[:50]],
+            discovered_paths=discovered_paths,
             js_endpoints=[e for endpoints in js_endpoints if isinstance(endpoints, dict) for e in endpoints.get("endpoints", [])],
             server_headers=self._extract_server_headers(live_hosts),
         )
 
         def _llm_call(prompt):
-            """Synchronous LLM call for wordlist generation."""
-            try:
-                import httpx as req
-                api_key = __import__("os").getenv("GLM_API_KEY", "")
-                if api_key and not api_key.startswith("your_"):
+            """Synchronous LLM call for wordlist generation — tries deepseek, falls back to glm."""
+            import os
+            import httpx as req
+
+            providers = []
+            ds_key = os.getenv("DEEPSEEK_API_KEY", "")
+            if ds_key and not ds_key.startswith("your_"):
+                providers.append(("deepseek-v4-flash", "https://api.deepseek.com/v1/chat/completions", ds_key))
+            glm_key = os.getenv("GLM_API_KEY", "")
+            if glm_key and not glm_key.startswith("your_"):
+                providers.append(("glm-4-flash", "https://open.bigmodel.cn/api/paas/v4/chat/completions", glm_key))
+
+            for model_name, url, api_key in providers:
+                try:
                     resp = req.post(
-                        "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+                        url,
                         headers={"Authorization": f"Bearer {api_key}"},
                         json={
-                            "model": "glm-4-flash",
+                            "model": model_name,
                             "messages": [{"role": "user", "content": prompt}],
                             "temperature": 0.1,
                             "max_tokens": 1000,
@@ -146,11 +168,12 @@ class ReconSkill(BaseSkill):
                         timeout=10,
                     )
                     return resp.json()["choices"][0]["message"]["content"]
-            except Exception:
-                pass
+                except Exception:
+                    continue
             return "[]"
 
-        wordlist = build_adaptive_wordlist(ctx, _llm_call, conn=wl_conn)
+        # Run sync wordlist build in a thread to avoid blocking the event loop
+        wordlist = await asyncio.to_thread(build_adaptive_wordlist, ctx, _llm_call, None, None)
         data["adaptive_wordlist"] = wordlist
         data["wordlist_size"] = len(wordlist)
 
@@ -181,7 +204,7 @@ class ReconSkill(BaseSkill):
             success=True,
             findings=[],
             data={
-                "subdomains_raw": [f"api.{target}", f"admin.{target}", f"cdn.{target}", f"www.{target}"],
+                "subdomains": [f"api.{target}", f"admin.{target}", f"cdn.{target}", f"www.{target}"],
                 "live_hosts": [
                     {"host": f"www.{target}", "url": f"https://www.{target}", "status": 200, "alive": True, "tech": ["Nginx", "PHP"]},
                     {"host": f"api.{target}", "url": f"https://api.{target}", "status": 200, "alive": True, "tech": ["Node.js", "Express"]},
@@ -243,14 +266,16 @@ class ReconSkill(BaseSkill):
         return await self.tools.run(tool, args, timeout=timeout)
 
     async def _enumerate_subdomains(self, target: str) -> list:
-        result = await self._run_tool("subfinder", ["-d", target, "-silent", "-timeout", "10"], timeout=15)
+        domain = self._domain_for_enum(target)
+        result = await self._run_tool("subfinder", ["-d", domain, "-silent", "-timeout", "10"], timeout=15)
         if result["success"] and result["stdout"].strip():
             return [line.strip() for line in result["stdout"].splitlines() if line.strip()]
-        return [target]
+        return [target]  # preserve port for local/dev targets
 
     async def _crawl_public_sources(self, target: str) -> list:
+        domain = self._domain_for_enum(target)
         result = await self.tools.run("curl", [
-            "-s", f"https://crt.sh/?q=%25.{target}&output=json"
+            "-s", f"https://crt.sh/?q=%25.{domain}&output=json"
         ])
         urls = set()
         if result["success"] and result["stdout"].strip():
@@ -258,12 +283,16 @@ class ReconSkill(BaseSkill):
                 entries = json.loads(result["stdout"])
                 for e in entries:
                     name = e.get("name_value", "")
-                    urls.add(f"https://{name}")
+                    for n in name.split("\n"):
+                        n = n.strip()
+                        if n and not n.startswith("*."):
+                            urls.add(f"https://{n}")
             except json.JSONDecodeError:
                 pass
 
         if not urls:
-            urls.add(f"https://{target}")
+            scheme = "http" if self._is_local_target(target) else "https"
+            urls.add(f"{scheme}://{target}")
         return list(urls)
 
     async def _detect_live_hosts(self, hosts: list) -> list:
@@ -352,9 +381,26 @@ class ReconSkill(BaseSkill):
             ], timeout=15)
             if result["success"] and result["stdout"].strip():
                 return [u.strip() for u in result["stdout"].splitlines() if u.strip()]
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"katana crawl failed for {url}: {e}")
         return []
+
+    async def _crawl_deep_quick(self, urls: list) -> list:
+        """Lightweight crawl for quick mode — katana depth 1, short timeout."""
+        if not urls:
+            return []
+        tasks = []
+        for url in urls:
+            tasks.append(self._run_tool("katana", [
+                "-u", url, "-d", "1", "-silent", "-jc", "-kf",
+                "-timeout", "5",
+            ], timeout=10))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        out = []
+        for r in results:
+            if isinstance(r, dict) and r.get("success") and r.get("stdout", "").strip():
+                out.extend(u.strip() for u in r["stdout"].splitlines() if u.strip())
+        return out
 
     async def _fuzz_single_host(self, url: str) -> list:
         """Fuzz a single host with ffuf (10s timeout)."""
@@ -381,8 +427,8 @@ class ReconSkill(BaseSkill):
                     if line.strip():
                         word = line.split()[0]
                         discovered.append(f"{base}/{word}")
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"ffuf fuzzing failed for {base}: {e}")
         finally:
             import os
             try:
@@ -391,30 +437,6 @@ class ReconSkill(BaseSkill):
                 pass
 
         return discovered
-
-    async def _crawl_deep(self, urls: list) -> list:
-        """Legacy: crawl multiple URLs (kept for backward compat)."""
-        if not urls:
-            return []
-        tasks = [self._crawl_deep_single(u) for u in urls[:3]]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        out = []
-        for r in results:
-            if isinstance(r, list):
-                out.extend(r)
-        return out
-
-    async def _fuzz_directories(self, urls: list) -> list:
-        """Legacy: fuzz multiple hosts (kept for backward compat)."""
-        if not urls:
-            return []
-        tasks = [self._fuzz_single_host(u) for u in urls[:3]]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        out = []
-        for r in results:
-            if isinstance(r, list):
-                out.extend(r)
-        return out
 
     def _extract_attack_surface(self, urls: list, target: str) -> dict:
         endpoints = set()
@@ -535,7 +557,18 @@ Return JSON:
 
     @staticmethod
     def _clean_target(target: str) -> str:
+        """Normalize target but keep the port — required for local/dev servers."""
         target = target.strip().lower()
         target = re.sub(r"^https?://", "", target)
         target = re.sub(r"/.*$", "", target)
         return target
+
+    @staticmethod
+    def _domain_for_enum(target: str) -> str:
+        """Strip port for tools that need bare domains (subfinder, crt.sh)."""
+        return re.sub(r":\d+$", "", target)
+
+    @staticmethod
+    def _is_local_target(target: str) -> bool:
+        """Check if target is a local/dev server."""
+        return bool(re.match(r"(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[::1\])", target))

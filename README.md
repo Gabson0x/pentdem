@@ -1,4 +1,4 @@
-# PENTDEM — Autonomous AI Pentesting Daemon
+# PENTDEM v1.5.0 — Autonomous AI Pentesting Daemon
 
 Autonomous AI-powered pentesting platform that deploys coordinated agents for reconnaissance, vulnerability discovery, proof-of-concept validation, kill-chain analysis, and compliance reporting.
 
@@ -29,48 +29,84 @@ Autonomous AI-powered pentesting platform that deploys coordinated agents for re
 
 ## Quick Start
 
+### Prerequisites
+- **Python 3.11+** — check with `python3 --version`
+- **pip** — latest recommended (`pip install --upgrade pip`)
+- **Docker** (optional) — for sandboxed tool execution (`--docker` flag)
+- **API keys** (all free tiers):
+  - GLM: [open.bigmodel.cn](https://open.bigmodel.cn/)
+  - Featherless: [featherless.ai](https://featherless.ai/)
+
+### Installation
+
 ```bash
-# Clone
+# Clone the repo
 git clone <repo>
 cd pentdem
 
-# Install dependencies
-pip install -r requirements.txt
+# Install globally as editable (recommended — picks up code changes instantly)
+pip install -e .
 
-# Copy environment file
-cp .env.example .env
-
-# Add API keys (all free tiers)
-# - GLM: https://open.bigmodel.cn/
-# - Featherless: https://featherless.ai/
-
-# Run mock mode (no API calls)
-python cli.py example.com full hackerone --mock
-
-# ★ RECOMMENDED: Full scan with pipeline engine + Docker isolation
-python cli.py example.com full hackerone --engine pipeline --docker
-
-# Run with autonomous agent (simpler, less coverage)
-python cli.py example.com full hackerone
-
-# Run with both engines (slowest, most thorough)
-python cli.py example.com full hackerone --engine hybrid
+# Alternative: install directly from git (no local clone)
+pip install git+https://github.com/<org>/pentdem.git
 ```
 
-### ★ Recommended Command
+### Add to PATH
+
+The `pentdem` command is installed to your user Python bin directory. If it's not on PATH:
+
+**macOS / Linux:**
+```bash
+# Find where pip installed the binary
+pip show pentdem | grep Location
+
+# Add the corresponding bin/ to your shell config (~/.zshrc, ~/.bashrc)
+export PATH="$HOME/Library/Python/3.14/bin:$PATH"   # macOS Homebrew Python
+export PATH="$HOME/.local/bin:$PATH"                 # Linux / macOS system Python
+
+# Reload
+source ~/.zshrc
+```
+
+**Windows (PowerShell):**
+```powershell
+$env:Path += ";$env:APPDATA\Python\Python314\Scripts"
+```
+
+### Verify
 
 ```bash
-python cli.py <target> full <platform> --engine pipeline --docker
+pentdem --help
+# Should show the PENTDEM banner with usage, options, and examples
 ```
 
-**Why pipeline + docker is better than agent mode:**
-- **15 vuln classes** run in parallel (agent runs 4 sequentially)
+### Run
+
+```bash
+# Copy environment file and add your API keys
+cp .env.example .env
+
+# Mock mode — test the pipeline without API calls
+pentdem example.com --mock
+
+# Quick scan (top vuln classes)
+pentdem example.com --mode quick
+
+# ★ RECOMMENDED: Full scan with Docker isolation
+pentdem example.com --docker --mode full
+
+# Targeted scan (core 4: IDOR, SSRF, XSS, SQLi)
+pentdem example.com --mode targeted
+```
+
+### Why pentdem
+- **15 vuln classes** run in parallel (XSS, SQLi, SSRF, IDOR, SSTI, LFI, command injection...)
 - **8 advanced attack skills** run in parallel (JWT, OAuth, mass assignment, race condition, cloud metadata, subdomain takeover, credential harvesting, API discovery)
-- **WAF fingerprinting** runs on all live hosts automatically
+- **WAF fingerprinting** runs on all live hosts automatically with auto-bypass
 - **Docker isolation** sandboxes dangerous tools (sqlmap, nuclei, nmap)
 - **Quality gate** rejects weak findings before report
 - **Kill-chain builder** chains findings into attack paths
-- **Faster** — parallel execution vs sequential agent phases
+- **AI-driven decisions** — real LLM analyzes responses and adapts strategy mid-scan
 
 ## Pipeline Flow
 
@@ -103,35 +139,41 @@ recon → scan → fuzz → exploit → chain → quality_gate → validate → 
 
 ```bash
 # ★ RECOMMENDED: Full scan with all attack classes + Docker isolation
-python cli.py <target> full <platform> --engine pipeline --docker
+pentdem <target> --mode full --docker
 
-# Full scan (24 vuln classes, ~2min mock)
-python cli.py <target> full <platform> [--mock] [--docker]
+# Full scan (24 vuln classes)
+pentdem <target> --mode full
 
 # Quick scan (top 6 vuln classes)
-python cli.py <target> quick [--mock] [--docker]
+pentdem <target> --mode quick
 
 # Targeted scan (core 4: IDOR, SSRF, XSS, SQLi)
-python cli.py <target> targeted [--mock] [--docker]
+pentdem <target> --mode targeted
+
+# With platform context (hackerone, bugcrowd, etc.)
+pentdem <target> --mode full --platform hackerone
 
 # Engine selection
-python cli.py <target> full hackerone --engine agent      # Autonomous agent (simpler)
-python cli.py <target> full hackerone --engine pipeline   # ★ Pipeline (recommended)
-python cli.py <target> full hackerone --engine hybrid     # Both engines (slowest)
+pentdem <target> --engine agent      # Autonomous agent (simpler)
+pentdem <target> --engine pipeline   # Pipeline (legacy)
+pentdem <target> --engine hybrid     # Both engines (slowest, most thorough)
 
 # Docker isolation (sandboxed tool execution)
-python cli.py <target> full hackerone --docker
+pentdem <target> --docker
+
+# Mock mode (no API calls — test the pipeline)
+pentdem <target> --mock
 
 # Source code analysis
-python cli.py github.com/org/repo full github --source repo
+pentdem github.com/org/repo --source repo
 
 # Standalone agent
 python -m agents.autonomous <target> [--mock]
 
 # Knowledge base
-python cli.py knowledge fetch     # Fetch disclosed reports
-python cli.py knowledge stats     # Show stats
-python cli.py knowledge search <q>
+pentdem knowledge fetch     # Fetch disclosed reports
+pentdem knowledge stats     # Show stats
+pentdem knowledge search <q>
 ```
 
 ## Engines
@@ -283,10 +325,12 @@ Real-time monitoring UI:
 ## File Structure
 
 ```
-├── cli.py                    # CLI entry point (--docker, --engine, --mock)
-├── main.py                   # Daemon entry point
-├── server.py                 # FastAPI server
-├── pipeline.py               # Swarm orchestrator (agent + pipeline engines)
+├── pentdem/                   # Unified CLI entry point (pip installable)
+│   └── __init__.py            # Main entry + banner + pipeline orchestration
+├── pyproject.toml             # Package config (pip install -e .)
+├── main.py                    # Daemon entry point
+├── server.py                  # FastAPI server
+├── pipeline.py                # Swarm orchestrator (agent + pipeline engines)
 ├── adaptive_engine.py        # Mid-run test adaptation
 ├── concurrent_hunt.py        # Parallel hunt runner (with attack strategy)
 ├── ai_decision_engine.py     # Autonomous decisions (deeper/switch/stop)

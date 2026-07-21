@@ -189,14 +189,29 @@ class WAFBypassEngine:
             "modsecurity": ["server: mod_security", "server: modsecurity"],
         }
 
-    def detect_waf(self, headers: dict, status: int) -> Optional[str]:
-        """Detect WAF from response headers. Returns WAF name or None."""
+        _non_waf_servers = {"airtunes", "werkzeug", "python", "gunicorn", "waitress",
+                              "jetty", "tomcat", "apache", "nginx", "caddy", "iis",
+                              "lighttpd", "litespeed", "cherrypy", "tornado", "twisted"}
+
+    def detect_waf(self, headers: dict, status: int, body: str = "") -> Optional[str]:
+        """Detect WAF from response headers. Returns WAF name or None.
+
+        Only flags a WAF when there are concrete fingerprint matches or
+        the response body contains WAF-like block-page indicators.
+        A bare 403 without WAF signatures is NOT treated as a WAF —
+        it could be AirPlay, a missing auth header, rate limiting, etc.
+        """
         if status not in (403, 406, 429, 503):
             return None
 
         headers_lower = {k.lower(): v.lower() for k, v in headers.items()}
         server = headers_lower.get("server", "")
 
+        # Known non-WAF servers — a 403 from these is not a WAF
+        if server in self._non_waf_servers:
+            return None
+
+        # Concrete WAF fingerprint matches
         for waf_name, signatures in self._waf_signatures.items():
             for sig in signatures:
                 if ":" in sig:
@@ -206,7 +221,20 @@ class WAFBypassEngine:
                 elif sig in server:
                     return waf_name
 
-        return "unknown-waf" if status == 403 else None
+        # Only return "unknown-waf" when the response body looks like a
+        # WAF block page (contains common block-page keywords).
+        if body:
+            body_lower = body.lower()
+            waf_body_indicators = (
+                "blocked", "access denied", "request denied",
+                "security policy", "waf", "firewall", "challenge",
+                "captcha", "attention required", "please enable cookies",
+                "ray id", "cf-browser-verification",
+            )
+            if any(ind in body_lower for ind in waf_body_indicators):
+                return "unknown-waf"
+
+        return None
 
     # ─── Bypass Techniques ─────────────────────────────────────────
 

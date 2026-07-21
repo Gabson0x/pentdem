@@ -26,11 +26,10 @@ class ModelClient:
     def _init_clients(self):
         if key := os.getenv("DEEPSEEK_API_KEY"):
             if not key.startswith("your_") and not key.startswith("sk-"):
-                pass
-            self.openai_clients["deepseek"] = AsyncOpenAI(
-                api_key=key,
-                base_url="https://api.deepseek.com/v1"
-            )
+                self.openai_clients["deepseek"] = AsyncOpenAI(
+                    api_key=key,
+                    base_url="https://api.deepseek.com/v1"
+                )
         if key := os.getenv("KIMI_API_KEY"):
             self.openai_clients["kimi"] = AsyncOpenAI(
                 api_key=key,
@@ -106,13 +105,16 @@ class ModelClient:
         max_retries = 3
         for attempt in range(max_retries):
             try:
+                kwargs = {
+                    "model": actual_model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": 4096,
+                }
+                if model in self.THINKING_MODE_MODELS:
+                    kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
                 response = await asyncio.wait_for(
-                    client.chat.completions.create(
-                        model=actual_model,
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=4096,
-                    ),
+                    client.chat.completions.create(**kwargs),
                     timeout=20,
                 )
                 return response.choices[0].message.content
@@ -168,11 +170,18 @@ class ModelClient:
             pass
         return "Analysis unavailable"
 
+    # Models that should use DeepSeek thinking mode
+    THINKING_MODE_MODELS = {"deepseek-pro", "deepseek-v4-pro"}
+
     def _resolve_provider(self, model: str) -> str:
         provider_map = {
             "deepseek": "deepseek",
             "deepseek-v3": "deepseek",
             "deepseek-r1": "deepseek",
+            "deepseek-flash": "deepseek",
+            "deepseek-v4-flash": "deepseek",
+            "deepseek-pro": "deepseek",
+            "deepseek-v4-pro": "deepseek",
             "kimi": "kimi",
             "kimi-k2.6": "kimi",
             "qwen": "qwen",
@@ -187,7 +196,14 @@ class ModelClient:
 
     def _get_model_name(self, provider: str, requested: str) -> str:
         model_names = {
-            "deepseek": "deepseek-chat",
+            "deepseek": {
+                "deepseek-v4-flash": "deepseek-v4-flash",
+                "deepseek-v4-pro": "deepseek-v4-pro",
+                "deepseek-flash": "deepseek-v4-flash",
+                "deepseek-pro": "deepseek-v4-pro",
+                "deepseek-r1": "deepseek-v4-flash",
+                "default": "deepseek-v4-flash",
+            },
             "kimi": "moonshot-v1-128k",
             "qwen": "qwen-plus",
             "glm": "glm-4-flash",
@@ -200,6 +216,9 @@ class ModelClient:
                 "default": "zai-org/GLM-5.2",
             }
         }
+        if provider == "deepseek":
+            mapping = model_names["deepseek"]
+            return mapping.get(requested, mapping["default"])
         if provider == "featherless":
             mapping = model_names["featherless"]
             if requested in ("deepseek-r1", "reasoning"):
@@ -211,10 +230,10 @@ class ModelClient:
             elif requested in ("report", "write"):
                 return mapping["report"]
             return mapping["default"]
-        return model_names.get(provider, "deepseek-chat")
+        return model_names.get(provider, "deepseek-v4-flash")
 
     def _get_fallback(self, failed_provider: str) -> Optional[str]:
-        fallback_order = ["featherless", "deepseek", "glm", "kimi", "qwen"]
+        fallback_order = ["deepseek", "featherless", "glm", "kimi", "qwen"]
         for fb in fallback_order:
             if fb != failed_provider and fb in self.openai_clients:
                 return fb
@@ -234,41 +253,41 @@ class ModelClient:
             "js_analysis": "glm",
             "directory_fuzzing": "glm",
             "tech_fingerprint": "minimax",
-            # Hunting — cheap for standard tests, expensive for analysis
-            "vulnerability_analysis": "glm",
-            "exploit_writing": "featherless",
-            "idor_testing": "featherless",
+            # Hunting — cheap for standard tests, deepseek-pro for reasoning-heavy
+            "vulnerability_analysis": "deepseek-pro",
+            "exploit_writing": "deepseek-pro",
+            "idor_testing": "deepseek-pro",
             "ssrf_testing": "glm",
             "xss_testing": "glm",
             "sqli_testing": "minimax",
-            "rce_testing": "featherless",
+            "rce_testing": "deepseek-pro",
             "ssti_testing": "glm",
             "lfi_testing": "glm",
-            "path_traversal_testing": "featherless",
+            "path_traversal_testing": "deepseek-pro",
             "nosql_testing": "glm",
             "graphql_testing": "glm",
             "jwt_testing": "glm",
-            "auth_bypass_testing": "featherless",
+            "auth_bypass_testing": "deepseek-pro",
             "open_redirect_testing": "glm",
             "deserialization_testing": "glm",
             "race_condition_testing": "glm",
             "bizlogic_testing": "glm",
             "api_security_testing": "glm",
-            # Validation — cheap for filtering, expensive for judgment
+            # Validation — cheap for filtering, deepseek for judgment
             "triage": "glm",
             "severity": "glm",
-            "dedup": "featherless",
+            "dedup": "deepseek-pro",
             "cvss_scoring": "minimax",
             "poc_generation": "glm",
-            # Chains & Reporting — expensive (high reasoning, low volume)
-            "chain_analysis": "featherless",
-            "report_writing": "featherless",
-            "pattern_learning": "featherless",
-            "knowledge_update": "featherless",
-            # Source code analysis
-            "source_code_audit": "featherless",
-            "dependency_analysis": "featherless",
-            "pr_review": "featherless",
+            # Chains & Reporting — deepseek-pro (high reasoning, low volume)
+            "chain_analysis": "deepseek-pro",
+            "report_writing": "deepseek-pro",
+            "pattern_learning": "deepseek-pro",
+            "knowledge_update": "deepseek-pro",
+            # Source code analysis — deepseek-pro
+            "source_code_audit": "deepseek-pro",
+            "dependency_analysis": "deepseek-pro",
+            "pr_review": "deepseek-pro",
         }
         return assignments.get(task_type, "featherless")
 
@@ -276,7 +295,10 @@ class ModelClient:
         available = []
         if self.anthropic_client:
             available.append({"provider": "minimax", "model": "MiniMax-M3", "name": "MiniMax-M3"})
-        for provider in ["deepseek", "kimi", "qwen", "glm"]:
+        if "deepseek" in self.openai_clients:
+            available.append({"provider": "deepseek", "model": "deepseek-v4-flash", "name": "DeepSeek V4 Flash"})
+            available.append({"provider": "deepseek", "model": "deepseek-v4-pro", "name": "DeepSeek V4 Pro (thinking)"})
+        for provider in ["kimi", "qwen", "glm"]:
             if provider in self.openai_clients:
                 available.append({"provider": provider, "model": f"{provider}-chat", "name": provider.title()})
         if "featherless" in self.openai_clients:
@@ -293,10 +315,10 @@ class ModelClient:
 MODEL_ASSIGNMENTS = {
     "ReconSkill": "glm",        # Cheap — high volume recon analysis
     "HuntSkill": "glm",         # Cheap — standard payload injection
-    "ChainSkill": "featherless", # Expensive — complex chain reasoning
+    "ChainSkill": "deepseek-pro",  # Reasoning — complex chain analysis with thinking
     "KnowledgeSkill": "glm",    # Cheap — pattern matching
     "ValidateSkill": "glm",     # Cheap — filtering/validation
-    "ReportSkill": "featherless", # Expensive — structured report writing
+    "ReportSkill": "deepseek-pro",  # Reasoning — structured report writing with thinking
     "MemorySkill": "glm",       # Cheap — storage/retrieval
 }
 

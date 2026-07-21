@@ -18,18 +18,10 @@ from typing import Dict, List, Any
 from skills.base import BaseSkill, SkillResult
 
 
-# Sensitive endpoints prone to race conditions
-SENSITIVE_ENDPOINTS = [
-    "/api/transfer", "/api/pay", "/api/checkout", "/api/purchase",
-    "/api/withdraw", "/api/deposit", "/api/redeem", "/api/coupon",
-    "/api/vote", "/api/like", "/api/claim", "/api/reward",
-    "/api/refund", "/api/subscribe", "/api/register", "/api/order",
-]
-
-
 class RaceConditionSkill(BaseSkill):
     """
     Detect race conditions via concurrent request testing.
+    Only tests URLs that actually exist (2xx/3xx baseline).
     """
 
     def can_handle(self, task_type: str) -> bool:
@@ -37,24 +29,38 @@ class RaceConditionSkill(BaseSkill):
 
     async def execute(self, context: Dict[str, Any]) -> SkillResult:
         urls = context.get("urls", [])
-        target = context.get("target", "")
         
         findings = []
         
-        # Test discovered endpoints
-        test_urls = urls[:5] + [f"https://{target}{ep}" for ep in SENSITIVE_ENDPOINTS]
-        
-        for url in test_urls[:10]:
+        # Only test real discovered URLs — no synthetic financial endpoints
+        for url in urls[:5]:
+            if not await self._endpoint_exists(url):
+                continue
             race_findings = await self._test_race_condition(url)
             findings.extend(race_findings)
 
         return SkillResult(
             success=True,
             findings=findings,
-            data={"urls_tested": len(test_urls), "race_findings": len(findings)},
+            data={"urls_tested": len(urls[:5]), "race_findings": len(findings)},
             next_skills=["validate"],
             confidence=min(len(findings) / 2, 1.0) if findings else 0.0,
         )
+
+    async def _endpoint_exists(self, url: str) -> bool:
+        """Quick check if endpoint returns 2xx before doing heavy concurrent testing."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                "--max-time", "5", url,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            code = int(stdout.decode(errors="ignore").strip())
+            return 200 <= code < 300
+        except Exception:
+            return False
 
     async def _test_race_condition(self, url: str) -> List[Dict]:
         """Test for race condition on a URL."""
@@ -76,6 +82,11 @@ class RaceConditionSkill(BaseSkill):
             return findings
         
         # Step 2: Analyze responses for race condition evidence
+        
+        # Guard: only flag findings when ALL responses are 2xx
+        all_2xx = all(200 <= r.get("status", 0) < 300 for r in valid_responses)
+        if not all_2xx:
+            return findings
         
         # Check for duplicate resources
         ids = set()
@@ -108,58 +119,24 @@ class RaceConditionSkill(BaseSkill):
                         })
                     ids.add(resource_id)
         
-        # Check for inconsistent responses (different balances, counts)
-        status_codes = [r.get("status", 0) for r in valid_responses]
-        if len(set(status_codes)) > 1:
-            findings.append({
-                "type": "race_condition_inconsistent",
-                "url": url,
-                "severity": "high",
-                "confidence": 0.75,
-                "cvss_score": 7.0,
-                "evidence": f"Inconsistent responses: {dict((s, status_codes.count(s)) for s in set(status_codes))}",
-                "payload": f"{concurrent_count} concurrent requests in {elapsed:.2f}s",
-                "param": "Request Timing",
-                "description": "Race condition — inconsistent response codes from concurrent requests",
-                "source_tool": "race-condition",
-            })
-        
         # Check for response time anomalies (TOCTOU indicator)
         response_times = [r.get("time", 0) for r in valid_responses if r.get("time")]
         if response_times:
             avg_time = sum(response_times) / len(response_times)
             max_time = max(response_times)
-            if max_time > avg_time * 3:  # One request took 3x longer
+            if max_time > avg_time * 5 and max_time > 2.0:
                 findings.append({
                     "type": "race_condition_timing",
                     "url": url,
-                    "severity": "medium",
-                    "confidence": 0.6,
-                    "cvss_score": 5.0,
+                    "severity": "low",
+                    "confidence": 0.4,
+                    "cvss_score": 3.0,
                     "evidence": f"Response time anomaly: avg={avg_time:.2f}s, max={max_time:.2f}s",
                     "payload": f"{concurrent_count} concurrent requests in {elapsed:.2f}s",
                     "param": "Request Timing",
                     "description": "Possible TOCTOU — timing anomaly suggests serialization issue",
                     "source_tool": "race-condition",
                 })
-        
-        # Check for body differences (value manipulation)
-        bodies = [r.get("body", "") for r in valid_responses]
-        unique_bodies = set(bodies)
-        if len(unique_bodies) > 1 and len(valid_responses) > 5:
-            # Different responses to same request = race condition
-            findings.append({
-                "type": "race_condition_value_manipulation",
-                "url": url,
-                "severity": "critical",
-                "confidence": 0.85,
-                "cvss_score": 8.5,
-                "evidence": f"{len(unique_bodies)} different responses to {concurrent_count} identical requests",
-                "payload": f"{concurrent_count} concurrent requests",
-                "param": "Request Timing",
-                "description": "Race condition — different responses suggest value manipulation possible",
-                "source_tool": "race-condition",
-            })
         
         return findings
 

@@ -21,6 +21,7 @@ from skills.bypass import BypassEngine
 from skills.waf_bypass import BypassResult
 from skills.shared_waf import SharedWAFBypass
 from skills.attack_strategy import LLMAttackStrategy
+from skills.reflection_context import classify_reflection, recommended_probe, EXECUTABLE, NEEDS_BREAKOUT, INERT, NOT_REFLECTED
 
 
 # ─── URL Scorer (Deterministic, No LLM) ──────────────────────────
@@ -296,7 +297,20 @@ class ConcurrentHuntRunner:
             payload = payload_info["payload"]
             param = payload_info.get("param", "test")
             method = payload_info.get("method", "GET")
-            headers = payload_info.get("headers", None)
+
+            # Header-based payloads (auth bypass, JWT) — send payload in a
+            # custom header instead of injecting into the URL.
+            header_spec = payload_info.get("header")
+            if header_spec:
+                if ":" in header_spec:
+                    header_name, prefix = header_spec.split(":", 1)
+                    headers = {header_name.strip(): f"{prefix.strip()} {payload}"}
+                else:
+                    headers = {header_spec.strip(): payload}
+                test_url = url  # don't modify URL for header-based tests
+            else:
+                headers = payload_info.get("headers")
+                test_url = self._inject_payload(url, payload, vuln_class, param=param)
 
             # For SSTI: use WAF bypass engine with verdict system
             if vuln_class == "ssti":
@@ -307,10 +321,7 @@ class ConcurrentHuntRunner:
                     findings.append(self._build_finding_from_verdict(verdict, target))
                 continue
 
-            # For other vuln classes: standard detection
-            test_url = self._inject_payload(url, payload, vuln_class)
-
-            # Acquire rate limit token
+            # Make request with rate limit token
             await self.limiter.acquire()
 
             # Make request with fast-fail timeout
@@ -329,11 +340,13 @@ class ConcurrentHuntRunner:
                         ))
 
             except asyncio.TimeoutError:
-                # Fast-fail: try once more
+                # Fast-fail: try once more with same method/headers
                 try:
                     await self.limiter.acquire()
                     async with self._semaphore:
-                        resp = await self._make_request(test_url, timeout=4)
+                        resp = await self._make_request(
+                            test_url, method=method, headers=headers, timeout=4
+                        )
                         pr = self._parse_response(resp.get("raw", ""))
                         if self._check_vuln(pr, vuln_class, payload):
                             findings.append(self._build_finding(
@@ -386,8 +399,11 @@ class ConcurrentHuntRunner:
                 resp = await self._make_request(test_url, timeout=4)
                 pr = self._parse_response(resp.get("raw", ""))
 
-                # Check if blocked
-                waf = bypass_engine.detect_waf(pr.get("headers", {}), pr.get("status", 0))
+                # Check if blocked (passes body so detect_waf can check for
+                # block-page indicators, avoiding false-positives on AirPlay etc.)
+                waf = bypass_engine.detect_waf(
+                    pr.get("headers", {}), pr.get("status", 0), pr.get("body", "")
+                )
                 if waf:
                     # WAF blocked → trigger LLM-enhanced bypass chain
                     print(f"    WAF detected ({waf}), attempting LLM-enhanced bypass...")
@@ -601,8 +617,8 @@ class ConcurrentHuntRunner:
 
     # ─── URL Injection ───────────────────────────────────────────
 
-    def _inject_payload(self, url: str, payload: str, vuln_class: str) -> str:
-        """Inject payload into URL parameters."""
+    def _inject_payload(self, url: str, payload: str, vuln_class: str, param: str = None) -> str:
+        """Inject payload into URL parameters. Uses `param` if specified, otherwise the first parameter."""
         from urllib.parse import urlparse, parse_qs, urlencode
 
         parsed = urlparse(url)
@@ -610,7 +626,10 @@ class ConcurrentHuntRunner:
 
         if not params:
             # No params — append as generic
-            params["test"] = [payload]
+            params[param or "test"] = [payload]
+        elif param and param in params:
+            # Inject into the specified parameter
+            params[param] = [payload]
         else:
             # Inject into first parameter
             first_param = list(params.keys())[0]
@@ -684,7 +703,11 @@ class ConcurrentHuntRunner:
             return True
 
         elif vuln_class == "xss":
-            # Require payload reflection in body
+            # Substring check — correct for the initial detection pass.
+            # The reflection_context classifier requires a canary sandwich
+            # probe (two copies of the nonce with probe chars between them),
+            # so it only works in the verifier path, not here with complex
+            # payloads like <script>alert(1)</script>.
             return payload.lower() in body_lower or "alert" in body_lower
 
         elif vuln_class == "sqli":
@@ -735,6 +758,16 @@ class ConcurrentHuntRunner:
         elif vuln_class == "deserialization":
             return status in (200, 500)
 
+        elif vuln_class == "jwt":
+            # JWT alg=none / signature bypass — server accepts modified token
+            return status == 200 and not any(
+                e in body_lower for e in ("invalid", "unauthorized", "malformed")
+            )
+
+        elif vuln_class == "mass_assignment":
+            # Mass assignment accepted — 200/201 with success indicators
+            return status in (200, 201)
+
         return False
 
     # ─── Build Finding ───────────────────────────────────────────
@@ -755,11 +788,11 @@ class ConcurrentHuntRunner:
 
         # Build proper HTTP request string
         param_name = list(parse_qs(parsed.query).keys())[0] if parse_qs(parsed.query) else "test"
-        http_request = f"GET {url.split('://')[-1] if '://' in url else url} HTTP/1.1\\nHost: {parsed.netloc}\\nUser-Agent: Mozilla/5.0\\nAccept: */*"
+        http_request = f"GET {url.split('://')[-1] if '://' in url else url} HTTP/1.1\nHost: {parsed.netloc}\nUser-Agent: Mozilla/5.0\nAccept: */*"
 
         # Build HTTP response from actual response
         header_strs = [f"{k}: {v}" for k, v in headers.items()]
-        http_response = f"HTTP/1.1 {status}\\n" + "\\n".join(header_strs[:10]) + f"\\n\\n{body[:2000]}"
+        http_response = f"HTTP/1.1 {status}\n" + "\n".join(header_strs[:10]) + f"\n\n{body[:2000]}"
 
         # Extract evaluation proof for SSTI
         evaluation_proof = ""
@@ -770,6 +803,12 @@ class ConcurrentHuntRunner:
                 start = max(0, idx - 50)
                 end = min(len(body), idx + len(expected) + 50)
                 evaluation_proof = expected
+
+        # Reflection context is computed by the verifier (which uses
+        # recommended_probe(nonce) to create a proper canary sandwich).
+        # Skipping here — classify_reflection() requires two copies of the
+        # nonce, but the XSS payload only appears once in the response.
+        reflection_ctx = {}
 
         return {
             "type": vuln_class,
@@ -793,6 +832,7 @@ class ConcurrentHuntRunner:
             "http_response": http_response[:4000],
             "evaluation_proof": evaluation_proof,
             "response_context": self._extract_context(body, evaluation_proof),
+            "reflection_context": reflection_ctx,
             "tested_url": url,
             "reproduction_steps": f"Send payload '{payload}' to {url} parameter {param_name}",
         }

@@ -361,9 +361,9 @@ class PentestPipeline:
         tools = self.skills["hunt"].tools
         # Use scope-declared rate limit if available
         rate_limiter = None
-        if self.scope_guard and self.scope_guard.rate_limit_rps:
+        if self.scope_guard and self.scope_guard.declaration.rate_limit_rps:
             from rate_limiter import RateLimiter
-            rate_limiter = RateLimiter(max_per_sec=self.scope_guard.rate_limit_rps, burst=self.scope_guard.rate_limit_rps)
+            rate_limiter = RateLimiter(max_per_sec=self.scope_guard.declaration.rate_limit_rps, burst=self.scope_guard.declaration.rate_limit_rps)
         runner = ConcurrentHuntRunner(tools=tools, rate_limiter=rate_limiter, mock=self.config.get("mock_mode", False))
 
         all_findings = await runner.run_all_classes(
@@ -490,7 +490,7 @@ class PentestPipeline:
         ]
 
         # Cloud metadata only if scope allows it
-        if self.scope_guard and self.scope_guard.allow_cloud_metadata:
+        if self.scope_guard and self.scope_guard.declaration.allow_cloud_metadata:
             advanced_skills.append(("cloud_metadata", {**ctx, "urls": all_urls[:5]}))
 
         tasks = []
