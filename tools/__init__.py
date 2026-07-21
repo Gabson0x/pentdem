@@ -1,4 +1,5 @@
 import asyncio
+import os
 import subprocess
 import shutil
 from typing import List, Dict, Optional
@@ -16,7 +17,8 @@ class ToolExecutor:
         self._semaphore = asyncio.Semaphore(self.MAX_CONCURRENT)
         self.payloads = PayloadDB()
 
-    async def run(self, tool: str, args: List[str], timeout: int = None) -> Dict:
+    async def run(self, tool: str, args: List[str], timeout: int = None,
+                  extra_env: Optional[Dict[str, str]] = None) -> Dict:
         if self.mock:
             return self._mock_result(tool)
 
@@ -26,6 +28,11 @@ class ToolExecutor:
         cmd = [tool] + args
         timeout = timeout or self.TIMEOUT
 
+        # Build environment with optional extra vars (proxy, etc.)
+        env = os.environ.copy()
+        if extra_env:
+            env.update(extra_env)
+
         async with self._semaphore:
             try:
                 proc = await asyncio.wait_for(
@@ -33,6 +40,7 @@ class ToolExecutor:
                         *cmd,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
+                        env=env,
                     ),
                     timeout=timeout,
                 )

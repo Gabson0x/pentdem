@@ -155,13 +155,16 @@ class ConcurrentHuntRunner:
         "graphql": [{"type": "GraphQL Introspection", "url": "https://api.example.com/graphql", "severity": "medium", "description": "GraphQL introspection query exposed", "evidence": "Schema introspection enabled", "confidence": 1.0, "cvss_score": 5.3}],
     }
 
-    def __init__(self, tools: ToolExecutor, rate_limiter: RateLimiter = None, mock: bool = False):
+    def __init__(self, tools: ToolExecutor, rate_limiter: RateLimiter = None, mock: bool = False,
+                 session_manager=None, proxy_manager=None):
         self.tools = tools
         self.mock = mock
         self.limiter = rate_limiter or RateLimiter(max_per_sec=15, burst=30)
         self.bypass = BypassEngine()
         self.shared_waf = SharedWAFBypass()
         self.attack_strategy = LLMAttackStrategy()
+        self.session_manager = session_manager
+        self.proxy_manager = proxy_manager
         self._semaphore = asyncio.Semaphore(20)
 
     async def run_all_classes(
@@ -331,6 +334,10 @@ class ConcurrentHuntRunner:
                         test_url, method=method, headers=headers, timeout=4
                     )
                     pr = self._parse_response(resp.get("raw", ""))
+
+                    # Check for proxy rotation triggers (rate limit / block)
+                    if self.proxy_manager and pr.get("status") in (403, 429):
+                        await self.proxy_manager.report_rate_limit()
 
                     # Check for vulnerability indicators
                     if self._check_vuln(pr, vuln_class, payload):
@@ -980,8 +987,21 @@ class ConcurrentHuntRunner:
     async def _make_request(self, url: str, method: str = "GET",
                            headers: dict = None, data: str = None,
                            timeout: int = 4) -> dict:
-        """Make HTTP request via curl with fast timeout."""
+        """Make HTTP request via curl with session cookies and proxy support."""
         cmd = ["curl", "-s", "-i", "-L", "--max-time", str(timeout)]
+
+        # Attach session cookies if available
+        if self.session_manager:
+            auth_headers = await self.session_manager.get_curl_header(url)
+            cmd.extend(auth_headers)
+
+        # Attach proxy if available
+        extra_env = None
+        if self.proxy_manager:
+            proxy_args = await self.proxy_manager.get_curl_args()
+            cmd.extend(proxy_args)
+            extra_env = await self.proxy_manager.get_proxy_env()
+
         if headers:
             for k, v in headers.items():
                 cmd.extend(["-H", f"{k}: {v}"])
@@ -989,9 +1009,21 @@ class ConcurrentHuntRunner:
             cmd.extend(["-X", "POST"])
             if data:
                 cmd.extend(["--data", data])
+        elif method in ("PUT", "DELETE", "PATCH"):
+            cmd.extend(["-X", method])
+            if data:
+                cmd.extend(["--data", data])
+        elif method == "HEAD":
+            cmd.extend(["-X", "HEAD"])
         cmd.append(url)
 
-        result = await self.tools.run("curl", cmd[1:])
+        result = await self.tools.run("curl", cmd[1:], extra_env=extra_env)
+
+        # Update session cookies from response
+        if self.session_manager:
+            stdout = result.get("stdout", "")
+            await self.session_manager.update_from_response(url, stdout)
+
         return {
             "raw": result.get("stdout", ""),
             "success": result.get("success", False),

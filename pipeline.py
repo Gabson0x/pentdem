@@ -68,6 +68,9 @@ from concurrent_hunt import ConcurrentHuntRunner
 from rate_limiter import RateLimiter
 from models import ModelClient
 from agents.autonomous import AutonomousAgent
+from skills.session_manager import SessionManager
+from skills.proxy_manager import ProxyManager
+from skills.auth_broker import AuthBrokerSkill
 from tools import ToolExecutor
 from ai_decision_engine import AIDecisionEngine, Decision, DecisionType
 
@@ -121,6 +124,15 @@ class PentestPipeline:
 
         # Tools executor (shared with autonomous agent)
         self.tools = ToolExecutor(mock=mock)
+
+        # Auth subsystem — shared session state, proxy rotation, auth broker
+        self.session_manager = SessionManager()
+        self.proxy_manager = ProxyManager()
+        self.auth_broker = AuthBrokerSkill(
+            session_manager=self.session_manager,
+            tools=self.tools,
+            mock=mock,
+        )
 
         # Autonomous agent (primary engine)
         try:
@@ -364,7 +376,12 @@ class PentestPipeline:
         if self.scope_guard and self.scope_guard.declaration.rate_limit_rps:
             from rate_limiter import RateLimiter
             rate_limiter = RateLimiter(max_per_sec=self.scope_guard.declaration.rate_limit_rps, burst=self.scope_guard.declaration.rate_limit_rps)
-        runner = ConcurrentHuntRunner(tools=tools, rate_limiter=rate_limiter, mock=self.config.get("mock_mode", False))
+        runner = ConcurrentHuntRunner(
+            tools=tools, rate_limiter=rate_limiter,
+            mock=self.config.get("mock_mode", False),
+            session_manager=self.session_manager,
+            proxy_manager=self.proxy_manager,
+        )
 
         all_findings = await runner.run_all_classes(
             urls=all_urls,
@@ -476,6 +493,7 @@ class PentestPipeline:
             "tech_stack": tech_stack,
             "js_endpoints": js_endpoints,
             "mode": mode,
+            "session_manager": self.session_manager,
         }
 
         # Run all advanced skills in parallel
@@ -953,6 +971,26 @@ class PentestPipeline:
                 "patterns_loaded": len(knowledge_data["known_patterns"]),
                 "reports_loaded": len(knowledge_data["relevant_reports"]),
             }
+
+            # Phase 1.7: Auth detection & auto-login
+            await self.session_manager.load_from_env()
+            await self.proxy_manager.load_from_env()
+
+            auth_result = await self.auth_broker.execute({
+                "target": target,
+                "urls": recon_data.get("urls", []),
+            })
+            results["stages"]["auth"] = auth_result.data
+
+            auth_status = auth_result.data.get("auth_status", "unknown")
+            if auth_result.data.get("authenticated"):
+                await self._emit_progress("auth", "completed", 0.29, {
+                    "message": f"Authenticated via {auth_result.data.get('auth_type', 'session')}",
+                })
+            elif auth_status in ("auth_required", "auth_wall_detected", "login_page_detected_no_credentials"):
+                await self._emit_progress("auth", "warn", 0.29, {
+                    "message": f"Auth page detected ({auth_status}) — testing unauthenticated",
+                })
 
             # Phase 2: Hunt (parallel agents)
             findings = await self._phase_hunt(target, mode, recon_data, knowledge_data)
