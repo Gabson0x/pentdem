@@ -50,7 +50,8 @@ class ReportQualityGate:
     7. Injection point must be specified
     """
 
-    def __init__(self):
+    def __init__(self, mock: bool = False):
+        self.mock = mock
         self.stats = {"total": 0, "passed": 0, "rejected": 0, "auto_fixed": 0}
         self._seen_signatures = set()
 
@@ -355,7 +356,8 @@ class ReportQualityGate:
             return
 
         # Check URL doesn't contain example.com (mock data leak)
-        if "example.com" in url:
+        # Skip this check in mock mode — example.com is expected
+        if "example.com" in url and not self.mock:
             result.passed = False
             result.reasons.append(
                 f"URL contains example.com — this is mock/test data, not a real finding"

@@ -26,7 +26,6 @@ AUTH_TYPE_LOGIN = "login"
 AUTH_TYPE_REGISTER = "register"
 AUTH_TYPE_MFA = "mfa"
 AUTH_TYPE_OAUTH = "oauth"
-AUTH_TYPE_SSO = "sso"
 AUTH_TYPE_403_WALL = "auth_wall_403"
 AUTH_TYPE_401_WALL = "auth_wall_401"
 AUTH_TYPE_CAPTCHA = "captcha"
@@ -105,11 +104,6 @@ class AuthDetectionSkill:
         (r'(?:sign\s*in\s*with\s*(?:google|github|microsoft|facebook|apple|twitter))', 0.4, "oauth_text"),
     ]
 
-    AUTH_WALL_PATTERNS = [
-        (r'(?:access\s*denied|access\s*forbidden|unauthorized)', 0.3, "denied_text"),
-        (r'(?:please\s*log\s*in|please\s*authenticate|you\s*must\s*be\s*logged)', 0.4, "please_login"),
-    ]
-
     CAPTCHA_PATTERNS = [
         (r'(?:recaptcha|hcaptcha|turnstile|g-recaptcha|cf-turnstile)', 0.5, "captcha_script"),
         (r'(?:captcha|challenge|security\s*check)', 0.3, "captcha_text"),
@@ -182,7 +176,6 @@ class AuthDetectionSkill:
 
         category_scores = {}
         category_patterns = {}
-        category_hits = {}
 
         for cat_name, patterns in self._compiled.items():
             total = 0.0

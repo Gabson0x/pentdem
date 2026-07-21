@@ -149,7 +149,7 @@ class PentestPipeline:
         self.decision_engine = AIDecisionEngine(model_client=self.model_client)
         
         # Report Quality Gate — single chokepoint for all findings
-        self.quality_gate = ReportQualityGate()
+        self.quality_gate = ReportQualityGate(mock=mock)
 
         self.skills = {
             "learn": KnowledgeSkill(mock=mock),
@@ -245,8 +245,13 @@ class PentestPipeline:
 
     async def _validate_scope(self, target: str) -> bool:
         """Validate target is in scope before any agent execution."""
+        # Normalize target: strip scheme/path, keep only hostname
+        from urllib.parse import urlparse
+        parsed = urlparse(target if "://" in target else f"https://{target}")
+        domain = parsed.hostname or target
+
         decl = ScopeDeclaration(
-            domains=[target],
+            domains=[domain],
             engagement_type="bug_bounty",
             allow_internal_probing=False,
             allow_cloud_metadata=False,
@@ -258,7 +263,7 @@ class PentestPipeline:
         self.skills["hunt"].explorer.scope_guard = self.scope_guard
         self.skills["hunt"].session_bypass.scope_guard = self.scope_guard
 
-        validation = self.scope_guard.validate_target(target, ScopeOPSEC.MODERATE)
+        validation = self.scope_guard.validate_target(domain, ScopeOPSEC.MODERATE)
         if not validation.in_scope:
             await self._emit_progress("scope", "failed", 0, {"error": validation.reason})
             return False
