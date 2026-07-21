@@ -13,8 +13,6 @@ Usage:
 
 import asyncio
 import os
-import random
-import subprocess
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -161,11 +159,16 @@ class ProxyManager:
                          test_url: str = "http://httpbin.org/ip") -> bool:
         """Test if a proxy is working by making a request through it."""
         try:
-            result = subprocess.run(
-                ["curl", "-s", "--max-time", "5", "--proxy", proxy, test_url],
-                capture_output=True, timeout=10,
+            proc = await asyncio.wait_for(
+                asyncio.create_subprocess_exec(
+                    "curl", "-s", "--max-time", "5", "--proxy", proxy, test_url,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                ),
+                timeout=10,
             )
-            return result.returncode == 0 and b"origin" in result.stdout
+            stdout, _ = await proc.communicate()
+            return proc.returncode == 0 and b"origin" in stdout
         except Exception:
             return False
 

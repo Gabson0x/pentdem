@@ -389,7 +389,11 @@ class AuthBrokerSkill(BaseSkill):
                     ) as resp:
                         if resp.status == 200:
                             data = await resp.json()
-                            return data.get("text") or data.get("html")
+                            # mail.tm returns text/html as lists of strings
+                            html = data.get("html", [])
+                            text = data.get("text", [])
+                            body = (html[0] if html else "") or (text[0] if text else "")
+                            return body if body else None
             except Exception:
                 pass
         return None

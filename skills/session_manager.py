@@ -64,9 +64,9 @@ class CookieJar:
         async with self._lock:
             return {k: dict(v) for k, v in self._cookies.items()}
 
-    @property
-    def cookie_count(self) -> int:
-        return sum(len(c) for c in self._cookies.values())
+    async def cookie_count(self) -> int:
+        async with self._lock:
+            return sum(len(c) for c in self._cookies.values())
 
     async def clear(self):
         async with self._lock:
@@ -149,9 +149,6 @@ class SessionManager:
     async def update_from_response(self, url: str, raw_stdout: str):
         """Parse Set-Cookie headers from curl -i output and store them."""
         await self.cookie_jar.set_cookies_from_response(url, raw_stdout)
-        # If we got new cookies, we're authenticated
-        if self.cookie_jar.cookie_count > 0:
-            await self.mark_authenticated("session")
 
     # ── State management ───────────────────────────────────────
 
@@ -177,13 +174,15 @@ class SessionManager:
     def has_config_credentials(self) -> bool:
         return bool(self._username and self._password)
 
-    def get_auth_summary(self) -> dict:
-        return {
-            "authenticated": self._is_authenticated,
-            "auth_type": self._auth_type,
-            "has_credentials": self.has_config_credentials(),
-            "has_api_key": bool(self._api_key),
-            "has_token": bool(self._auth_token),
-            "has_raw_cookie": bool(self._raw_cookie),
-            "cookie_domains": list(self.cookie_jar._cookies.keys()),
-        }
+    async def get_auth_summary(self) -> dict:
+        all_cookies = await self.cookie_jar.get_all_cookies()
+        async with self._lock:
+            return {
+                "authenticated": self._is_authenticated,
+                "auth_type": self._auth_type,
+                "has_credentials": bool(self._username and self._password),
+                "has_api_key": bool(self._api_key),
+                "has_token": bool(self._auth_token),
+                "has_raw_cookie": bool(self._raw_cookie),
+                "cookie_domains": list(all_cookies.keys()),
+            }

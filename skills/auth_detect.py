@@ -244,19 +244,26 @@ class AuthDetectionSkill:
     async def _extract_form_details(self, body: str, base_url: str,
                                      result: AuthDetectionResult):
         """Extract form action, method, and input field names from HTML."""
-        # Extract form tag with action and method
+        # Try both orderings: action-then-method, method-then-action
         form_match = re.search(
             r'<form[^>]*action=["\']([^"\']*)["\'][^>]*method=["\'](get|post)["\']',
             body, re.IGNORECASE,
         )
+        swapped = False
         if not form_match:
             form_match = re.search(
                 r'<form[^>]*method=["\'](get|post)["\'][^>]*action=["\']([^"\']*)["\']',
                 body, re.IGNORECASE,
             )
+            swapped = True
+
         if form_match:
-            action = form_match.group(1) or form_match.group(2) or ""
-            method = form_match.group(2) if form_match.lastindex and form_match.lastindex >= 2 else "POST"
+            if swapped:
+                method = form_match.group(1)
+                action = form_match.group(2)
+            else:
+                action = form_match.group(1)
+                method = form_match.group(2)
             if action:
                 result.form_action = urljoin(base_url, action)
             result.form_method = method.upper() if method else "POST"
