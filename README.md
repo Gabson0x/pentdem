@@ -48,7 +48,7 @@ cd pentdem
 pip install -e .
 
 # Alternative: install directly from git (no local clone)
-pip install git+https://github.com/<org>/pentdem.git
+pip install git+https://github.com/gabson0x/pentdem.git
 ```
 
 ### Add to PATH

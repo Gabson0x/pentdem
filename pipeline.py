@@ -927,9 +927,13 @@ class PentestPipeline:
         # ENGINE: pipeline (legacy) — uses skills directly
         # ═══════════════════════════════════════════════════════════
         if engine in ("pipeline", "hybrid"):
-            # In hybrid mode, reuse agent's recon data instead of re-running
-            if engine == "hybrid" and "agent_recon" in results.get("stages", {}):
-                recon_data = results["stages"]["agent_recon"]
+            # In hybrid mode, reuse agent's recon data instead of re-running.
+            # Only reuse if the agent actually found something — otherwise
+            # an empty agent recon (no URLs, no hosts) starves the pipeline.
+            agent_recon = results.get("stages", {}).get("agent_recon", {})
+            if (engine == "hybrid" and
+                    (agent_recon.get("urls") or agent_recon.get("live_hosts") or agent_recon.get("subdomains"))):
+                recon_data = agent_recon
                 # Convert agent recon format to pipeline format
                 if "subdomains" not in recon_data:
                     recon_data["subdomains"] = recon_data.get("subdomains", [])

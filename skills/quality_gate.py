@@ -18,6 +18,7 @@ Every new attack class added to the pipeline inherits this gate for free.
 import re
 from typing import Dict, Any, List, Tuple, Optional
 from dataclasses import dataclass, field
+from urllib.parse import quote
 
 
 # Hardcoded defaults that indicate a detector didn't compute properly
@@ -151,12 +152,18 @@ class ReportQualityGate:
             return
 
         if payload and payload not in http_request:
-            result.passed = False
-            result.reasons.append(
-                f"REQUEST/EVIDENCE MISMATCH: payload '{payload}' not found in http_request. "
-                f"This usually means the detector fabricated the finding without actually sending the payload."
-            )
-            return
+            # Payloads are often URL-encoded in GET requests — check encoded forms too
+            url_encoded_pct = quote(payload, safe='')
+            url_encoded_plus = quote(payload, safe='').replace('%20', '+')
+            url = finding.get("url", "")
+            if (url_encoded_pct not in http_request and url_encoded_plus not in http_request
+                    and payload not in url and url_encoded_pct not in url and url_encoded_plus not in url):
+                result.passed = False
+                result.reasons.append(
+                    f"REQUEST/EVIDENCE MISMATCH: payload '{payload}' not found in http_request or url. "
+                    f"This usually means the detector fabricated the finding without actually sending the payload."
+                )
+                return
 
         if param and param not in http_request and param not in finding.get("url", ""):
             result.warnings.append(

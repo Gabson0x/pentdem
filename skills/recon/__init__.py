@@ -274,21 +274,24 @@ class ReconSkill(BaseSkill):
 
     async def _crawl_public_sources(self, target: str) -> list:
         domain = self._domain_for_enum(target)
-        result = await self.tools.run("curl", [
-            "-s", f"https://crt.sh/?q=%25.{domain}&output=json"
-        ])
         urls = set()
-        if result["success"] and result["stdout"].strip():
-            try:
-                entries = json.loads(result["stdout"])
-                for e in entries:
-                    name = e.get("name_value", "")
-                    for n in name.split("\n"):
-                        n = n.strip()
-                        if n and not n.startswith("*."):
-                            urls.add(f"https://{n}")
-            except json.JSONDecodeError:
-                pass
+
+        # crt.sh is meaningless for local/dev targets — skip to avoid garbage
+        if not self._is_local_target(target):
+            result = await self.tools.run("curl", [
+                "-s", f"https://crt.sh/?q=%25.{domain}&output=json"
+            ])
+            if result["success"] and result["stdout"].strip():
+                try:
+                    entries = json.loads(result["stdout"])
+                    for e in entries:
+                        name = e.get("name_value", "")
+                        for n in name.split("\n"):
+                            n = n.strip()
+                            if n and not n.startswith("*."):
+                                urls.add(f"https://{n}")
+                except json.JSONDecodeError:
+                    pass
 
         if not urls:
             scheme = "http" if self._is_local_target(target) else "https"
@@ -376,7 +379,7 @@ class ReconSkill(BaseSkill):
         """Crawl a single URL with katana (15s timeout)."""
         try:
             result = await self._run_tool("katana", [
-                "-u", url, "-d", "2", "-silent", "-jc", "-kf",
+                "-u", url, "-d", "2", "-silent", "-jc",
                 "-timeout", "8",
             ], timeout=15)
             if result["success"] and result["stdout"].strip():
@@ -392,7 +395,7 @@ class ReconSkill(BaseSkill):
         tasks = []
         for url in urls:
             tasks.append(self._run_tool("katana", [
-                "-u", url, "-d", "1", "-silent", "-jc", "-kf",
+                "-u", url, "-d", "1", "-silent", "-jc",
                 "-timeout", "5",
             ], timeout=10))
         results = await asyncio.gather(*tasks, return_exceptions=True)
