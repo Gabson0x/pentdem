@@ -43,6 +43,9 @@ from skills.validate import ValidateSkill
 from skills.report import ReportSkill
 from skills.memory import MemorySkill
 from skills.quality_gate import ReportQualityGate
+from skills.adversarial_validation import AdversarialValidator
+from skills.capability_ledger import CapabilityLedger, CAT_HUNT, CAT_ADVANCED
+from skills.ship_gate import ShipDisciplineGate
 from skills.subdomain_takeover import SubdomainTakeoverSkill
 from skills.jwt_attack import JWTAttackSkill
 from skills.api_discovery import APIDiscoverySkill
@@ -150,6 +153,10 @@ class PentestPipeline:
         
         # Report Quality Gate — single chokepoint for all findings
         self.quality_gate = ReportQualityGate(mock=mock)
+
+        # Capability execution ledger, populated during hunt/advanced-hunt so the
+        # final verdict can be blocked when scheduled capabilities did not run.
+        self.capability_ledger: Optional[CapabilityLedger] = None
 
         self.skills = {
             "learn": KnowledgeSkill(mock=mock),
@@ -396,6 +403,14 @@ class PentestPipeline:
             tech_hints=", ".join(tech_stack),
         )
 
+        # Record per-class execution evidence (recomputed from real probe outcomes)
+        # so a crashed or never-probed vuln class becomes visible coverage debt
+        # instead of masquerading as "tested, found nothing".
+        if self.capability_ledger is not None:
+            self.capability_ledger.record_from_telemetry(
+                runner.get_capability_telemetry(), category=CAT_HUNT
+            )
+
         await self._emit_progress("hunt", "running", 0.45, {
             "message": f"Found {len(all_findings)} potential findings, verifying with canary tests..."
         })
@@ -564,15 +579,32 @@ class PentestPipeline:
 
     async def _run_advanced_skill(self, skill_name: str, ctx: dict) -> list:
         """Run a single advanced skill and return findings."""
+        start = time.monotonic()
+
+        def _record(status: str, findings: int = 0, error: str = ""):
+            if self.capability_ledger is not None:
+                self.capability_ledger.record(
+                    skill_name, CAT_ADVANCED,
+                    status=status, findings=findings, error=error,
+                    probes_ok=1 if status == "executed" else 0,
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                )
+
         try:
             skill = self.skills.get(skill_name)
             if not skill:
+                _record("errored", error="skill not registered")
                 return []
             result = await asyncio.wait_for(skill.execute(ctx), timeout=30)
-            return result.findings if hasattr(result, "findings") else []
+            findings = result.findings if hasattr(result, "findings") else []
+            _record("executed", findings=len(findings))
+            return findings
         except asyncio.TimeoutError:
+            # A timed-out capability is coverage debt, not a clean empty result.
+            _record("errored", error="timeout after 30s")
             return []
-        except Exception:
+        except Exception as e:
+            _record("errored", error=repr(e))
             return []
 
     async def _run_deeper_tests(
@@ -703,6 +735,47 @@ class PentestPipeline:
         await self._emit_progress("validate", "completed", 0.85, {"validated": len(validated)})
         return validated
 
+    async def _phase_adversarial(self, findings: List) -> tuple:
+        """
+        Phase 4.2: Adversarial validation. A DIFFERENT model than the finding's
+        author is asked to refute it. Survivors continue; confident refutations
+        are dropped. Kills the false positives that same-model confirmation and
+        deterministic re-tests both wave through.
+        """
+        if not findings:
+            return findings, []
+
+        await self._emit_progress("adversarial", "running", 0.86, {
+            "message": f"Cross-model disprove pass on {len(findings)} findings...",
+        })
+
+        validator = AdversarialValidator(
+            model_client=self.model_client,
+            mock=self.config.get("mock_mode", False),
+        )
+        survivors, refuted = await validator.challenge_batch(findings)
+
+        await self._emit_progress("adversarial", "completed", 0.865, {
+            "survived": len(survivors),
+            "refuted": len(refuted),
+            "stats": validator.get_stats(),
+        })
+        return survivors, refuted
+
+    def _phase_ship_gate(self, findings: List, target: str, platform: str) -> tuple:
+        """
+        Phase 4.3: Ship-discipline. Decide which real findings are worth sending
+        to THIS program. Below-floor severity, out-of-scope-by-class, and
+        already-reported findings are held back as informational instead of
+        padding the report and burning triager signal.
+        """
+        if not findings:
+            return findings, []
+
+        gate = ShipDisciplineGate(platform=platform)
+        shippable, held_back = gate.filter_batch(findings, target)
+        return shippable, held_back
+
     async def _phase_screenshot(self, target: str, findings: List) -> List:
         """Phase 4.5: Screenshot capture — capture evidence of top findings."""
         await self._emit_progress("screenshot", "running", 0.87, {
@@ -762,6 +835,7 @@ class PentestPipeline:
         findings: List,
         chains: List,
         tool_outputs: List[dict] = None,
+        coverage_warning: str = "",
     ) -> dict:
         """Phase 5: Report generation — standalone MD reports in per-target folders."""
         await self._emit_progress("report", "running", 0.90, {
@@ -784,6 +858,7 @@ class PentestPipeline:
             metadata={
                 "candidate_findings": len(candidate_findings),
                 "rejected_findings": len(candidate_findings) - len(reportable_findings),
+                "coverage_warning": coverage_warning,
             },
         )
 
@@ -859,6 +934,10 @@ class PentestPipeline:
             "evidence": {},
             "metrics": {"started_at": time.time(), "completed_at": None, "duration": 0},
         }
+
+        # Fresh capability ledger for this run, records what actually executed so
+        # the terminal verdict can be blocked on coverage debt.
+        self.capability_ledger = CapabilityLedger()
 
         # Initialize evidence handler - save in reports folder alongside findings
         self.evidence = EvidenceHandler(
@@ -1053,11 +1132,35 @@ class PentestPipeline:
         validated_findings = [v for v in validated if v.get("type") != "Attack Chain"]
         validated_chains = [v for v in validated if v.get("type") == "Attack Chain"]
 
+        # Phase 4.2: Adversarial validation, a different model tries to refute
+        # each finding; only survivors continue.
+        validated_findings, adv_refuted = await self._phase_adversarial(validated_findings)
+        results["adversarially_refuted"] = adv_refuted
+
+        # Phase 4.3: Ship-discipline, program-fit gate splits report-worthy
+        # findings from informational/out-of-scope/duplicate ones.
+        validated_findings, informational = self._phase_ship_gate(validated_findings, target, platform)
+        results["informational_findings"] = informational
+
         # Phase 4.5: Screenshot
         validated_findings = await self._phase_screenshot(target, validated_findings)
 
+        # Capability coverage audit: the "done" verdict must be earned by
+        # capabilities actually executing, not by phases self-reporting completion.
+        coverage = self.capability_ledger.to_dict()
+        results["capability_ledger"] = coverage
+        results["coverage_complete"] = coverage["audit"]["clean"]
+        if not coverage["audit"]["clean"]:
+            await self._emit_progress("coverage", "warn", 0.88, {
+                "message": coverage["coverage_warning"],
+                "debt": coverage["audit"]["debt"],
+            })
+
         # Phase 5: Report — use validated chains, not raw chains
-        report_data = await self._phase_report(target, platform, validated_findings, validated_chains, tool_outputs)
+        report_data = await self._phase_report(
+            target, platform, validated_findings, validated_chains, tool_outputs,
+            coverage_warning=coverage.get("coverage_warning", ""),
+        )
         results["stages"]["report"] = report_data
         results["report"] = report_data.get("report")
         results["report_path"] = report_data.get("report_path")
