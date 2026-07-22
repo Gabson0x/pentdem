@@ -166,6 +166,9 @@ class ConcurrentHuntRunner:
         self.session_manager = session_manager
         self.proxy_manager = proxy_manager
         self._semaphore = asyncio.Semaphore(20)
+        # Per-class execution evidence for the capability ledger. Recomputed from
+        # real probe outcomes, never a self-reported "done" flag.
+        self._telemetry: Dict[str, dict] = {}
 
     async def run_all_classes(
         self,
@@ -181,7 +184,17 @@ class ConcurrentHuntRunner:
         """
         # Mock mode: return mock findings directly
         if self.mock:
-            return self._mock_findings(target, vuln_classes)
+            findings = self._mock_findings(target, vuln_classes)
+            for vc in vuln_classes:
+                n = len(self.MOCK_FINDINGS.get(vc, []))
+                self._telemetry[vc] = {
+                    "probed_urls": max(1, len(urls)),
+                    "probes_ok": max(1, len(urls)),
+                    "probes_failed": 0,
+                    "findings": n,
+                    "note": "mock",
+                }
+            return findings
 
         start = time.monotonic()
 
@@ -194,13 +207,22 @@ class ConcurrentHuntRunner:
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Collect all findings
+        # Collect all findings and record per-class execution evidence. A class
+        # whose coroutine raised is recorded as errored instead of being silently
+        # dropped. The capability ledger reads this back to detect coverage debt.
         all_findings = []
         for i, result in enumerate(results):
             vc = vuln_classes[i] if i < len(vuln_classes) else "unknown"
             if isinstance(result, Exception):
+                tele = self._telemetry.setdefault(vc, {})
+                tele["error"] = repr(result)
+                tele.setdefault("probed_urls", 0)
+                tele.setdefault("probes_ok", 0)
+                tele.setdefault("probes_failed", 0)
+                tele["findings"] = 0
                 continue
             all_findings.extend(result)
+            self._telemetry.setdefault(vc, {})["findings"] = len(result)
 
         # Use attack strategy to re-prioritize if we have findings
         if all_findings:
@@ -241,6 +263,16 @@ class ConcurrentHuntRunner:
         elapsed = time.monotonic() - start
         return deduped
 
+    def get_capability_telemetry(self) -> Dict[str, dict]:
+        """
+        Per-class execution evidence from the last run_all_classes call.
+
+        Shape: {vuln_class: {probed_urls, probes_ok, probes_failed, findings,
+        error?, note?}}. Consumed by CapabilityLedger.record_from_telemetry so a
+        crashed or never-probed class becomes visible coverage debt.
+        """
+        return dict(self._telemetry)
+
     def _mock_findings(self, target: str, vuln_classes: List[str]) -> List[dict]:
         """Return mock findings for testing."""
         findings = []
@@ -264,22 +296,30 @@ class ConcurrentHuntRunner:
         # Score and rank URLs for this class
         top_urls = rank_urls_for_class(urls, vuln_class, top_n=5)
 
+        # Per-class execution evidence, recomputed from real probe outcomes so the
+        # capability ledger can distinguish "tested, found nothing" from "the
+        # class had no candidate URLs" from "every probe failed".
+        tele = {"probed_urls": len(top_urls), "probes_ok": 0, "probes_failed": 0}
+        self._telemetry[vuln_class] = tele
+
         findings = []
 
         # Run each URL concurrently (within rate limit)
         url_tasks = []
         for url in top_urls:
             url_tasks.append(
-                self._test_url(url, vuln_class, target, knowledge, tech_hints)
+                self._test_url(url, vuln_class, target, knowledge, tech_hints, telemetry=tele)
             )
 
         url_results = await asyncio.gather(*url_tasks, return_exceptions=True)
 
         for result in url_results:
             if isinstance(result, Exception):
+                tele["probes_failed"] += 1
                 continue
             findings.extend(result)
 
+        tele["findings"] = len(findings)
         return findings
 
     async def _test_url(
@@ -289,9 +329,15 @@ class ConcurrentHuntRunner:
         target: str,
         knowledge: list = None,
         tech_hints: str = "",
+        telemetry: dict = None,
     ) -> List[dict]:
         """Test a single URL with a vuln class, using rate limiter."""
         findings = []
+
+        def _probe(ok: bool):
+            if telemetry is None:
+                return
+            telemetry["probes_ok" if ok else "probes_failed"] += 1
 
         # Get payloads for this class
         payloads = self._get_payloads(vuln_class)
@@ -320,6 +366,7 @@ class ConcurrentHuntRunner:
                 verdict = await self._test_ssti_with_bypass(
                     url, param, payload, target
                 )
+                _probe(True)
                 if verdict.is_reportable():
                     findings.append(self._build_finding_from_verdict(verdict, target))
                 continue
@@ -334,6 +381,7 @@ class ConcurrentHuntRunner:
                         test_url, method=method, headers=headers, timeout=4
                     )
                     pr = self._parse_response(resp.get("raw", ""))
+                    _probe(True)
 
                     # Check for proxy rotation triggers (rate limit / block)
                     if self.proxy_manager and pr.get("status") in (403, 429):
@@ -355,15 +403,16 @@ class ConcurrentHuntRunner:
                             test_url, method=method, headers=headers, timeout=4
                         )
                         pr = self._parse_response(resp.get("raw", ""))
+                        _probe(True)
                         if self._check_vuln(pr, vuln_class, payload):
                             findings.append(self._build_finding(
                                 url=test_url, vuln_class=vuln_class,
                                 payload=payload, response=pr, target=target,
                             ))
                 except Exception:
-                    pass
+                    _probe(False)
             except Exception:
-                pass
+                _probe(False)
 
         return findings
 

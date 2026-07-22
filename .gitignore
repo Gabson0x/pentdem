@@ -18,6 +18,9 @@ data/patterns.json
 reports/
 !reports/.gitkeep
 
+# Ship-discipline ledger (per-target already-reported signatures)
+.ship_ledger/
+
 # Evidence
 evidence/
 !evidence/.gitkeep

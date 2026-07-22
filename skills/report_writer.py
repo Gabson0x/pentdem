@@ -415,6 +415,12 @@ This report presents the findings of an automated security assessment of **{targ
 | Low | {sev_counts.get("LOW", 0)} |
 
 """
+        # Coverage-debt banner: if scheduled capabilities did not execute, a
+        # no-findings/low-severity result is not authoritative and must say so.
+        coverage_warning = metadata.get("coverage_warning", "")
+        if coverage_warning:
+            content += f"> ⚠️ **{coverage_warning}**\n\n"
+
         if sev_counts.get("CRITICAL", 0) > 0:
             content += """**⚠️ CRITICAL vulnerabilities were identified that require immediate attention.**
 

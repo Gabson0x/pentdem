@@ -21,8 +21,8 @@ Autonomous AI-powered pentesting platform that deploys coordinated agents for re
 │                     Merge findings                                      │
 │                          ↓                                              │
 │  ┌────────────────────────────────────────────────────────────────┐     │
-│  │  Quality Gate → Kill Chain Builder → Compliance Mapper         │     │
-│  │  → Report → Session Persistence → Dashboard                    │     │
+│  │  Quality Gate → Adversarial Validation → Ship Gate → Chain     │     │
+│  │  → Compliance Mapper → Report (+ Coverage Ledger) → Dashboard  │     │
 │  └────────────────────────────────────────────────────────────────┘     │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -107,6 +107,22 @@ pentdem example.com --mode targeted
 - **Quality gate** rejects weak findings before report
 - **Kill-chain builder** chains findings into attack paths
 - **AI-driven decisions** — real LLM analyzes responses and adapts strategy mid-scan
+- **Adversarial validation** (new): a second, different model tries to *refute* every finding; only survivors ship
+- **Capability ledger** (new): proves each hunt class actually ran, so "0 findings" can't hide a crashed hunter
+- **Ship-discipline gate** (new): holds back below-threshold, out-of-scope, and duplicate findings so reports stay high-signal
+
+## Validation & Coverage Integrity
+
+Automated hunters fail two silent ways: they report findings a human triager instantly rejects, and they under-report because a capability crashed with nobody noticing. Three gates close both gaps.
+
+### Adversarial validation (cross-model disprove)
+Every earlier gate *confirms* a finding with a single model, and the validate step even passes on timeout. This gate inverts the burden of proof: each finding is handed to a **different** model family than the one that produced it, with one instruction, refute it. It hunts the benign reading (reflected-but-escaped, a 200 that is really the login page, an id that changed but returns public data, an SSRF that never leaves the app's own trust boundary). A finding is dropped only on a *confident* refutation; transport or parse errors fail open so a human still sees it. The false positives that get a report bounced never reach the report.
+
+### Capability execution ledger
+The hunt fans 15+ classes out with `asyncio.gather(..., return_exceptions=True)`, and the advanced runner wraps each skill in `except: return []`. A crashed class therefore produces the same output as a class that ran and found nothing: zero findings. The ledger records, per capability, evidence recomputed from what actually happened (URLs probed, probes that returned vs errored, whether the coroutine raised), never a self-reported flag. If a scheduled capability did not execute, the run carries **coverage debt**, `coverage_complete` is false, and the report says so, so a clean result is never mistaken for a thorough one.
+
+### Ship-discipline gate (program-fit)
+Being real is not the same as being worth sending. This gate reads the target `--platform` and buckets each real finding: `report` (meets the severity floor and in-scope class), `informational` (below floor, informational class, or out-of-scope-by-class), or `duplicate` (already reported for this target in a prior run, tracked in a small per-target ledger). Only `report` findings enter the vulnerability section, so submissions stay high-signal.
 
 ## Pipeline Flow
 
@@ -114,7 +130,8 @@ pentdem example.com --mode targeted
 ```
 recon → learn → hunt (15 vuln classes parallel)
   → advanced_hunt (8 attack skills parallel + WAF fingerprinting)
-  → quality_gate → chain → validate → screenshot → report → memory
+  → quality_gate → chain → validate → adversarial_validation (cross-model disprove)
+  → ship_gate (program-fit) → screenshot → report (+ coverage ledger) → memory
 ```
 
 ### Agent Engine (simpler)
@@ -133,7 +150,9 @@ recon → scan → fuzz → exploit → chain → quality_gate → validate → 
 | **quality_gate** | Evidence consistency check, dedup, reject weak findings | ~1s |
 | **chain** | Chain findings into attack paths, MITRE ATT&CK mapping | ~5s |
 | **validate** | 7-Question Gate, confirmation loops | ~10s |
-| **report** | Generate Markdown report with CVSS scoring | ~5s |
+| **adversarial_validation** | Cross-model disprove pass; drop confidently-refuted findings | ~10s |
+| **ship_gate** | Program-fit bucketing (report / informational / duplicate) | ~1s |
+| **report** | Markdown report with CVSS scoring + coverage-debt banner | ~5s |
 
 ## CLI Usage
 
@@ -355,6 +374,9 @@ Real-time monitoring UI:
 │   ├── memory/               # SQLite persistence + strategy memory
 │   ├── knowledge/            # Disclosed report parser
 │   ├── quality_gate.py       # Single chokepoint for all findings
+│   ├── adversarial_validation.py # Cross-model disprove gate (kills false positives)
+│   ├── capability_ledger.py  # Coverage-debt ledger (blocks clean verdict on non-execution)
+│   ├── ship_gate.py          # Program-fit gate (report / informational / duplicate)
 │   ├── evidence_collector.py # Standardized evidence collection
 │   ├── shared_waf.py         # Shared WAF fingerprinting & bypass
 │   ├── attack_strategy.py    # LLM-guided attack prioritization
@@ -430,6 +452,9 @@ Total: <$3/month (all free tiers)
 - [x] Subdomain takeover detection
 - [x] Cloud metadata exploitation
 - [x] Race condition detection
+- [x] Adversarial cross-model validation (disprove false positives before report)
+- [x] Capability execution ledger (block the clean verdict on coverage debt)
+- [x] Ship-discipline / program-fit gate (report / informational / duplicate bucketing)
 - [ ] Continuous monitoring / scheduled rescans
 - [ ] Automated patch suggestions
 - [ ] PR review / shift-left capability
